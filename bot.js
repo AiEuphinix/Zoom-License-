@@ -430,7 +430,7 @@ bot.on('callback_query', async (callbackQuery) => {
                 // 2. Update order status
                 await supabase.from('orders').update({ status: 'accepted' }).eq('order_id', orderId);
 
-                // 3. Edit message in order topic
+                // 3. Edit message in order topic (This is a photo, so use editMessageCaption)
                 await bot.editMessageCaption(msg.caption.replace("Order (Pending)", "Order (✅ Accepted)"), {
                     chat_id: msg.chat.id,
                     message_id: msg.message_id,
@@ -451,7 +451,8 @@ bot.on('callback_query', async (callbackQuery) => {
                 // 5. Delete from original Order Topic
                 await bot.deleteMessage(msg.chat.id, msg.message_id);
 
-                // 6. ***** START: MODIFIED NOTIFICATION (Combined Message) *****
+                // 6. ***** START: MODIFIED NOTIFICATION (Split Message) *****
+                // First message (Text only)
                 const successMsg = `
 Zoom Coin - [${coinsToAdd}] အားထည့်သွင်းပြီးပါပြီ။
 
@@ -461,12 +462,12 @@ Zoom Coin - [${coinsToAdd}] အားထည့်သွင်းပြီးပ�
 
 ကျွန်တော်တို့၏ Telegram Channel
 https://t.me/KoKos_Daily_Dose_of_Madness
-
-Zoom License ကိုဝယ်ယူလိုပါက (ဝယ်ယူရန်) ကိုနှိပ်ပေးပါ။
                 `;
-                
-                // Send the combined message WITH the button
-                bot.sendMessage(userId, successMsg, {
+                bot.sendMessage(userId, successMsg);
+
+                // Follow-up message (With button)
+                const followUpMsg = "Zoom License ကိုဝယ်ယူလိုပါက (ဝယ်ယူရန်) ကိုနှိပ်ပေးပါ။";
+                bot.sendMessage(userId, followUpMsg, {
                     reply_markup: {
                         inline_keyboard: [[ { text: "ဝယ်ယူရန်", callback_data: "buy_license_prompt" } ]]
                     }
@@ -476,6 +477,7 @@ Zoom License ကိုဝယ်ယူလိုပါက (ဝယ်ယူရန�
                 bot.answerCallbackQuery(callbackQuery.id, { text: "Order Accepted!" });
             }
             else if (action === 'admin_decline_order') {
+                // This is a photo, so use editMessageCaption
                 await bot.editMessageCaption(msg.caption.replace("Order (Pending)", "Order (❌ Declined)"), {
                     chat_id: msg.chat.id,
                     message_id: msg.message_id,
@@ -534,8 +536,8 @@ Zoom License ကိုဝယ်ယူလိုပါက (ဝယ်ယူရန�
                 // 4. Update license status
                 await supabase.from('licenses').update({ status: 'active' }).eq('license_id', licenseId);
 
-                // 5. Edit message in topic
-                await bot.editMessageCaption(msg.caption.replace("Zoom License (Pending)", "Zoom License (✅ Finished)"), {
+                // 5. Edit message in topic (This is a TEXT message, so use editMessageText and msg.text)
+                await bot.editMessageText(msg.text.replace("Zoom License (Pending)", "Zoom License (✅ Finished)"), {
                     chat_id: msg.chat.id,
                     message_id: msg.message_id,
                     parse_mode: 'HTML',
@@ -587,7 +589,8 @@ https://t.me/KoKos_Daily_Dose_of_Madness
                 
                 await supabase.from('licenses').update({ status: 'declined' }).eq('license_id', licenseId);
 
-                await bot.editMessageCaption(msg.caption.replace("Zoom License (Pending)", "Zoom License (❌ Declined)"), {
+                // This is a TEXT message, so use editMessageText and msg.text
+                await bot.editMessageText(msg.text.replace("Zoom License (Pending)", "Zoom License (❌ Declined)"), {
                     chat_id: msg.chat.id,
                     message_id: msg.message_id,
                     parse_mode: 'HTML',
@@ -726,11 +729,11 @@ Zoom Coin
 <b>${paymentType}</b>
 ${paymentInfo}
 
-သတိ - Note မှာ Zoom Pro ဟုရေးပို့ပေးပါ။
+သတိ - Note မှာ Zoom Pro ဟုရေးသွင်းပေးပါ။
 
 ငွေလွှဲပြေစာ (Screenshot) အားပေးပို့ပေးပါ။
             `;
-            const inline_keyboard = [[ { text: "⬅️ Back", callback_data: `buy_coin:${tempOrder.plan}` } ]];
+           const inline_keyboard = [[ { text: "⬅️ Back", callback_data: `buy_coin:${tempOrder.plan}` } ]];
             
             bot.editMessageCaption(text, {
                 chat_id: msg.chat.id,
@@ -889,7 +892,13 @@ Zoom License
 Zoom Pro ဝယ်ယူရာတွင် ကျွန်တော်တို့ဖက်မှ အကောင်းဆုံးဝန်ဆောင်မှုပေးထားပါတယ်ခင်ဗျာ။
 
 <b>[Zoom Bot ကိုဘယ်လိုအသုံးပြုမလဲ။]</b>
-... (full "how to" text) ...
+
+လူကြီးမင်းအနေနဲ့ Zoom Coin အားအရင်ဝယ်ယူရပါမယ်ခင်ဗျ။ (Zoom Coin ၁ ခုလျှင် Zoom License အား 14 ရက်ကြာအသုံးပြုနိုင်ပါသည်။)
+
+မိမိအသုံးပြုလိုသောနေ့တွင် ယခု Bot သို့ /zoom ဟုပေးပို့၍ အသုံးပြုနိုင်ပါသည်။
+
+Coin 1 ခုလျှင် ၁၄ ရက်သာ Zoom License အားရရှိမည်ဖြစ်ပြီး မိမိထပ်မံ့အသုံးပြုလိုလျှင် အထက်တွင်ပြထားသည့်အတိုင်း ပြန်လည်ပြုလုပ်၍အသုံးပြုနိုင်ပါသည်။
+
 Zoom Coin လက်ကျန်စစ်ဆေးလိုပါက /balance ဟုပေးပို့၍ စစ်ဆေးနိုင်ပါသည်။
 
 Zoom Pro Pricing and Plan
@@ -1046,4 +1055,4 @@ Expired On: ${formatMyanmarTime(license.expires_at)}
 setInterval(checkExpirations, 3600 * 1000); 
 checkExpirations(); // Run once on start
 
-console.log("Bot (v5 - Message merge fix) is running...");
+console.log("Bot (v7 - Split Message Fix) is running..."); 
