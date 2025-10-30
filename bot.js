@@ -255,10 +255,8 @@ bot.onText(/\/zoom/, async (msg) => {
     await updateUser(tgId, { stage: 'prompt_email', temp_data: {} });
     bot.sendMessage(msg.chat.id, "လူကြီးမင်း၏ emailအားပို့ပေးပါ။");
 });
-
-
 // -----------------------------------------------------------------
-// Part 2: Message Handlers and Callback Query Logic
+// Part 2: Message Handlers and Callback Query Logic (UPDATED)
 // -----------------------------------------------------------------
 
 // --- General Message Handler (Text & Photo) ---
@@ -378,7 +376,7 @@ Order Info
                     { text: "6Months", callback_data: `select_license:6Months` },
                     { text: "12Months", callback_data: `select_license:12Months` }
                 ],
-                [ { text: "⬅️ Back", callback_data: "back_to_email_prompt" } ] // <-- ADDED BACK BUTTON
+                [ { text: "⬅️ Back", callback_data: "back_to_email_prompt" } ]
             ];
             
             // Save email to temp_data
@@ -387,6 +385,7 @@ Order Info
         }
     }
 });
+
 
 // --- Callback Query Handler (Button Clicks) ---
 bot.on('callback_query', async (callbackQuery) => {
@@ -422,8 +421,8 @@ bot.on('callback_query', async (callbackQuery) => {
                 // 2. Update order status
                 await supabase.from('orders').update({ status: 'accepted' }).eq('order_id', orderId);
 
-                // 3. Edit message in order topic
-                bot.editMessageCaption(msg.caption.replace("Order (Pending)", "Order (✅ Accepted)"), {
+                // 3. Edit message in order topic (Update caption, remove buttons)
+                await bot.editMessageCaption(msg.caption.replace("Order (Pending)", "Order (✅ Accepted)"), {
                     chat_id: msg.chat.id,
                     message_id: msg.message_id,
                     parse_mode: 'HTML',
@@ -436,7 +435,10 @@ bot.on('callback_query', async (callbackQuery) => {
                     bot.forwardMessage(msg.chat.id, msg.chat.id, msg.message_id, { message_thread_id: finishedTopicId });
                 }
                 
-                // 5. Notify user
+                // 5. *** NEW: Delete from original Order Topic ***
+                await bot.deleteMessage(msg.chat.id, msg.message_id);
+
+                // 6. Notify user
                 const successMsg = `
 Zoom Coin - [${coinsToAdd}] အားထည့်သွင်းပြီးပါပြီ။
 
@@ -459,38 +461,73 @@ https://t.me/KoKos_Daily_Dose_of_Madness
                 bot.answerCallbackQuery(callbackQuery.id, { text: "Order Accepted!" });
             }
             else if (action === 'admin_decline_order') {
-                // ... Handle decline logic (e.g., notify user) ...
-                bot.editMessageCaption(msg.caption.replace("Order (Pending)", "Order (❌ Declined)"), {
+                // Edit message, remove buttons, then delete
+                await bot.editMessageCaption(msg.caption.replace("Order (Pending)", "Order (❌ Declined)"), {
                     chat_id: msg.chat.id,
                     message_id: msg.message_id,
                     parse_mode: 'HTML',
                     reply_markup: { inline_keyboard: [] }
                 });
+                // Optional: forward to a "declined" topic if needed
+                await bot.deleteMessage(msg.chat.id, msg.message_id);
+                
                 bot.sendMessage(userId, "Your order has been declined. Please contact admin.");
                 bot.answerCallbackQuery(callbackQuery.id, { text: "Order Declined!" });
             }
             else if (action === 'admin_finish_license') {
                 const licenseId = parseInt(orderIdStr); // Reusing variable
 
-                // 1. Update license status
-                const { data: license } = await supabase.from('licenses').update({ status: 'active' }).eq('license_id', licenseId).select().single();
-                if(!license) return bot.answerCallbackQuery(callbackQuery.id, { text: "License not found."});
+                // 1. Get license details
+                const { data: license, error: licenseError } = await supabase
+                    .from('licenses')
+                    .select('*')
+                    .eq('license_id', licenseId)
+                    .single();
+                
+                if (licenseError || !license) return bot.answerCallbackQuery(callbackQuery.id, { text: "License not found."});
+                if (license.status !== 'pending') return bot.answerCallbackQuery(callbackQuery.id, { text: "License already processed."});
 
-                // 2. Edit message in topic
-                bot.editMessageCaption(msg.caption.replace("Zoom License (Pending)", "Zoom License (✅ Finished)"), {
+                // 2. Check user balance
+                const { data: licenseUser, error: userError } = await supabase
+                    .from('users')
+                    .select('coin_balance')
+                    .eq('tg_id', userId)
+                    .single();
+                
+                if (userError || !licenseUser) return bot.answerCallbackQuery(callbackQuery.id, { text: "User not found."});
+
+                // Check if user STILL has enough coins
+                if (licenseUser.coin_balance < license.coins_spent) {
+                    return bot.answerCallbackQuery(callbackQuery.id, { 
+                        text: `Failed: User only has ${licenseUser.coin_balance} coins. (Needed ${license.coins_spent}).`,
+                        show_alert: true
+                    });
+                }
+
+                // 3. *** NEW: Deduct coins from user ***
+                await supabase.rpc('decrement_coin_balance', { user_id_in: userId, coins_to_subtract: license.coins_spent });
+
+                // 4. Update license status
+                await supabase.from('licenses').update({ status: 'active' }).eq('license_id', licenseId);
+
+                // 5. Edit message in topic (Update caption, remove buttons)
+                await bot.editMessageCaption(msg.caption.replace("Zoom License (Pending)", "Zoom License (✅ Finished)"), {
                     chat_id: msg.chat.id,
                     message_id: msg.message_id,
                     parse_mode: 'HTML',
                     reply_markup: { inline_keyboard: [] }
                 });
 
-                // 3. Forward to finished topic
+                // 6. Forward to finished topic
                 const finishedTopicId = await getSetting('license_finished_topic_id');
                 if (finishedTopicId) {
                     bot.forwardMessage(msg.chat.id, msg.chat.id, msg.message_id, { message_thread_id: finishedTopicId });
                 }
 
-                // 5. Notify user
+                // 7. *** NEW: Delete from original License Topic ***
+                await bot.deleteMessage(msg.chat.id, msg.message_id);
+
+                // 8. Notify user
                 const expiryDate = moment(license.expires_at).tz(MYANMAR_TZ).format("DD/MM/YYYY");
                 const userMsg = `
 Zoom License
@@ -518,7 +555,24 @@ https://t.me/KoKos_Daily_Dose_of_Madness
                 bot.answerCallbackQuery(callbackQuery.id, { text: "License Finished!" });
             }
             else if (action === 'admin_decline_license') {
-                // ... Handle decline (refund coins, notify user) ...
+                const licenseId = parseInt(orderIdStr);
+                
+                // 1. Update license status
+                await supabase.from('licenses').update({ status: 'declined' }).eq('license_id', licenseId);
+
+                // 2. Edit message
+                await bot.editMessageCaption(msg.caption.replace("Zoom License (Pending)", "Zoom License (❌ Declined)"), {
+                    chat_id: msg.chat.id,
+                    message_id: msg.message_id,
+                    parse_mode: 'HTML',
+                    reply_markup: { inline_keyboard: [] }
+                });
+
+                // 3. Delete message
+                await bot.deleteMessage(msg.chat.id, msg.message_id);
+
+                // 4. Notify user
+                bot.sendMessage(userId, "Your License order has been declined. No coins were deducted. Please contact admin.");
                 bot.answerCallbackQuery(callbackQuery.id, { text: "License Declined!" });
             }
         } catch (e) {
@@ -532,294 +586,6 @@ https://t.me/KoKos_Daily_Dose_of_Madness
     // --- USER-FACING BUTTONS (in private chat) ---
     try {
         if (data === 'buy_zoom_prompt') {
-            await updateUser(tgId, { stage: 'stage_2_plans' });
-            
-            const photoFileId = await getSetting('promo_photo_file_id');
-            if (!photoFileId) {
-                bot.answerCallbackQuery(callbackQuery.id, { text: "Error: Photo not set by admin." });
-                return;
-            }
-
-            // ** MODIFICATION: Combine text and photo into one message **
-            const text = `
-Zoom Pro ဝယ်ယူရာတွင် ကျွန်တော်တို့ဖက်မှ အကောင်းဆုံးဝန်ဆောင်မှုပေးထားပါတယ်ခင်ဗျာ။
-
-<b>[Zoom Bot ကိုဘယ်လိုအသုံးပြုမလဲ။]</b>
-
-လူကြီးမင်းအနေနဲ့ Zoom Coin အားအရင်ဝယ်ယူရပါမယ်ခင်ဗျ။ (Zoom Coin ၁ ခုလျှင် Zoom License အား 14 ရက်ကြာအသုံးပြုနိုင်ပါသည်။)
-
-မိမိအသုံးပြုလိုသောနေ့တွင် ယခု Bot သို့ /zoom ဟုပေးပို့၍ အသုံးပြုနိုင်ပါသည်။
-
-Coin 1 ခုလျှင် ၁၄ ရက်သာ Zoom License အားရရှိမည်ဖြစ်ပြီး မိမိထပ်မံ့အသုံးပြုလိုလျှင် အထက်တွင်ပြထားသည့်အတိုင်း ပြန်လည်ပြုလုပ်၍အသုံးပြုနိုင်ပါသည်။
-
-Zoom Coin လက်ကျန်စစ်ဆေးလိုပါက /balance ဟုပေးပို့၍ စစ်ဆေးနိုင်ပါသည်။
-
-Zoom Pro Pricing and Plan
-            `;
-            const inline_keyboard = [
-                [
-                    { text: "1Month", callback_data: "buy_coin:1Month" },
-                    { text: "3Months", callback_data: "buy_coin:3Months" }
-                ],
-                [
-                    { text: "6Months", callback_data: "buy_coin:6Months" },
-                    { text: "12Months", callback_data: "buy_coin:12Months" }
-                ],
-                [ { text: "⬅️ Back", callback_data: "back_to_start" } ] // <-- Back button
-            ];
-            
-            // Edit the original text message to become a photo message
-            try {
-                await bot.editMessageMedia({
-                    type: 'photo',
-                    media: photoFileId,
-                    caption: text,
-                    parse_mode: 'HTML'
-                }, {
-                    chat_id: msg.chat.id,
-                    message_id: msg.message_id,
-                    reply_markup: { inline_keyboard }
-                });
-            } catch (e) {
-                 console.error("editMessageMedia error:", e);
-                 // Fallback if edit fails
-                 bot.deleteMessage(msg.chat.id, msg.message_id).catch();
-                 bot.sendPhoto(msg.chat.id, photoFileId, { caption: text, parse_mode: 'HTML', reply_markup: { inline_keyboard }});
-            }
-            bot.answerCallbackQuery(callbackQuery.id);
-        }
-        else if (data.startsWith('buy_coin:')) {
-            const planKey = data.split(':')[1];
-            const plan = plans[planKey];
-            if (!plan) return bot.answerCallbackQuery(callbackQuery.id);
-            
-            // Save selection to temp_data
-            await updateUser(tgId, { 
-                stage: 'stage_3_payment', 
-                temp_data: { plan: plan.name, days: plan.days, coins: plan.coins, price: plan.price }
-            });
-
-            const text = `
-Zoom Coin
-🛍️: ${plan.name}
-🗓️: ${plan.days} Days
-🪙: ${plan.coins} Coins
-💰: ${plan.price} ks
-
-ဝယ်ယူရန် Payment ရွေးချယ်ပါ။
-အခြားသော Mobile Banking နှင့် အခြား Payment Method များအတွက် @touzainanboku051226 သို့ဆက်သွယ်ပါ။
-            `;
-            const inline_keyboard = [
-                [
-                    { text: "WavePay", callback_data: "pay:WavePay" },
-                    { text: "KBZPay", callback_data: "pay:KBZPay" }
-                ],
-                [
-                    { text: "AYAPay", callback_data: "pay:AYAPay" },
-                    { text: "UABPay", callback_data: "pay:UABPay" }
-                ],
-                [ { text: "⬅️ Back", callback_data: "back_to_plans" } ] // <-- Back button
-            ];
-            
-            // Edit the photo message caption
-            bot.editMessageCaption(text, {
-                chat_id: msg.chat.id,
-                message_id: msg.message_id,
-                reply_markup: { inline_keyboard }
-            });
-
-            bot.answerCallbackQuery(callbackQuery.id);
-        }
-        else if (data.startsWith('pay:')) {
-            const paymentType = data.split(':')[1];
-            const paymentInfo = paymentDetails[paymentType];
-            const tempOrder = user.temp_data;
-            
-            if (!paymentInfo || !tempOrder || !tempOrder.plan) {
-                 bot.answerCallbackQuery(callbackQuery.id, { text: "Error. Please /start again." });
-                 return;
-            }
-
-            await updateUser(tgId, { stage: 'awaiting_payment_proof' }); // Stage now awaits photo
-
-            const text = `
-🛍️: ${tempOrder.plan}
-🗓️: ${tempOrder.days} Days
-🪙: ${tempOrder.coins} Coins
-💰: ${tempOrder.price} ks
-
-ငွေလက်ခံနံပါတ်အား ${tempOrder.price} ks တိတိလွှဲပေးပါ။
-
-<b>${paymentType}</b>
-${paymentInfo}
-
-သတိ - Note မှာ သင့်အကောင့်နာမည်ရေးပေးပါ။
-
-Zoom Pro နှင့်သက်ဆိုင်သော Note များလုံးဝ၊ လုံးဝမရေးပေးရန် မတ္တာရပ်ခံအပ်ပါသည်။
-
-ငွေလွှဲပြေစာ (Screenshot) အားပေးပို့ပေးပါ။
-            `;
-            // Back button goes back to payment *method* selection
-            const inline_keyboard = [[ { text: "⬅️ Back", callback_data: `buy_coin:${tempOrder.plan}` } ]];
-            
-            bot.editMessageCaption(text, {
-                chat_id: msg.chat.id,
-                message_id: msg.message_id,
-                parse_mode: 'HTML',
-                reply_markup: { inline_keyboard }
-            });
-
-            bot.answerCallbackQuery(callbackQuery.id);
-        }
-        else if (data === 'buy_license_prompt') {
-            await updateUser(tgId, { stage: 'prompt_email', temp_data: {} });
-            bot.sendMessage(tgId, "လူကြီးမင်း၏ emailအားပို့ပေးပါ။");
-            bot.deleteMessage(msg.chat.id, msg.message_id); // clean up button
-            bot.answerCallbackQuery(callbackQuery.id);
-        }
-        else if (data.startsWith('select_license:')) {
-            const planKey = data.split(':')[1];
-            const plan = plans[planKey];
-            const email = user.temp_data.email;
-            
-            if (!plan || !email) return bot.answerCallbackQuery(callbackQuery.id, {text: "Error, please /zoom again."});
-
-            // Check balance
-            if (user.coin_balance < plan.coins) {
-                bot.answerCallbackQuery(callbackQuery.id, { 
-                    text: `Insufficient balance. You need ${plan.coins} coins, but you only have ${user.coin_balance}.`,
-                    show_alert: true 
-                });
-                return;
-            }
-            
-            // Save plan to temp_data
-            await updateUser(tgId, { 
-                stage: 'confirming_license',
-                temp_data: { ...user.temp_data, ...plan } // Spread the whole plan object
-            });
-
-            const expiryDate = moment().tz(MYANMAR_TZ).add(plan.days, 'days').format("DD/MM/YY");
-            const text = `
-Zoom License
-✉️: ${email}
-🛍️: ${plan.name}
-🪙: ${plan.coins} Coin
-🗓️: ${plan.days} Days
-
-ယခုဝယ်ယူပါက ကုန်ဆုံးမည့်သတ်တမ်း - ${expiryDate}
-
-ဝယ်ယူလိုပါက Confirm ကိုနှိပ်ပေးပါ
-            `;
-            const inline_keyboard = [
-                [ { text: "✅ Confirm", callback_data: "confirm_license_purchase" } ],
-                [ { text: "⬅️ Back", callback_data: "back_to_license_plan_selection" } ] // <-- Back button
-            ];
-            
-            bot.editMessageText(text, {
-                chat_id: msg.chat.id,
-                message_id: msg.message_id,
-                reply_markup: { inline_keyboard }
-            });
-            bot.answerCallbackQuery(callbackQuery.id);
-        }
-        else if (data === 'confirm_license_purchase') {
-            const licenseData = user.temp_data;
-            if (!licenseData || !licenseData.email || !licenseData.coins) {
-                return bot.answerCallbackQuery(callbackQuery.id, {text: "Error, please /zoom again."});
-            }
-            
-            // 1. Check balance again
-            if (user.coin_balance < licenseData.coins) {
-                 return bot.answerCallbackQuery(callbackQuery.id, { text: `Insufficient balance.`, show_alert: true });
-            }
-
-            // 2. Deduct coins
-            await supabase.rpc('decrement_coin_balance', { user_id_in: tgId, coins_to_subtract: licenseData.coins });
-
-            // 3. Create license entry
-            const expires_at = moment().tz(MYANMAR_TZ).add(licenseData.days, 'days').toISOString();
-            
-            // ----- THIS IS THE CORRECTED BLOCK -----
-            const { data: newLicense, error } = await supabase
-                .from('licenses')
-                .insert({
-                    user_id: tgId,
-                    email: licenseData.email,
-                    plan_name: licenseData.name, // Use .name from the spread plan object
-                    coins_spent: licenseData.coins,
-                    days: licenseData.days,
-                    status: 'pending',
-                    expires_at: expires_at
-                })
-                .select()
-                .single();
-            // ----- END OF CORRECTED BLOCK -----
-
-            if (error) {
-                console.error("Error creating license:", error);
-                // Refund coins if insert fails
-                await supabase.rpc('increment_coin_balance', { user_id_in: tgId, coins_to_add: licenseData.coins });
-                bot.editMessageText("License order failed. Your coins have been refunded.", {
-                    chat_id: msg.chat.id,
-                    message_id: msg.message_id
-                });
-                return bot.answerCallbackQuery(callbackQuery.id, {text: "Error creating license. Coins refunded."});
-            }
-            
-            // 4. Send to admin group
-            const groupId = await getSetting('group_id');
-            const topicId = await getSetting('license_topic_id');
-            const adminCaption = `
-Zoom License (Pending)
-🚹: ${user.first_name}
-🔗: <a href="tg://user?id=${user.tg_id}">Link to Profile</a>
-👤: ${user.username ? `@${user.username}` : 'N_A'}
-🆔: ${user.tg_id}
-
-Zoom License
-✉️: ${licenseData.email}
-🛍️: ${licenseData.name}
-🪙: ${licenseData.coins} Coin
-🗓️: ${licenseData.days} Days
-            `;
-            const admin_keyboard = [[
-                { text: "✅ Finished", callback_data: `admin_finish_license:${tgId}:${newLicense.license_id}` },
-                { text: "❌ Decline", callback_data: `admin_decline_license:${tgId}:${newLicense.license_id}:${licenseData.coins}` }
-            ]];
-
-            try {
-                 const sentAdminMsg = await bot.sendMessage(groupId, adminCaption, {
-                    parse_mode: 'HTML',
-                    message_thread_id: topicId,
-                    reply_markup: { inline_keyboard: admin_keyboard }
-                });
-                 // Save admin message_id to license table for future reference
-                 await supabase.from('licenses').update({ license_message_id: sentAdminMsg.message_id }).eq('license_id', newLicense.license_id);
-
-            } catch (e) { console.error("Error sending license to admin:", e); }
-
-            // 5. Notify user
-            bot.editMessageText("Zoom License အား Orderတင်ပြီးပါပြီ။ ခေတ္တခဏစောင့်ဆိုင်းပေးပါ။", {
-                chat_id: msg.chat.id,
-                message_id: msg.message_id,
-                reply_markup: { inline_keyboard: [] }
-            });
-            
-            // 6. Clear stage
-            await updateUser(tgId, { stage: 'start', temp_data: {} });
-            bot.answerCallbackQuery(callbackQuery.id);
-        }
-        
-        // --- NEW: Back Buttons Logic ---
-        
-        else if (data === 'back_to_start') {
-            // Edit the photo message back to the original start text message
-            await showStartMenu(msg.chat.id, callbackQuery.from, msg.message_id);
-            bot.answerCallbackQuery(callbackQuery.id);
-        }
-        else if (data === 'back_to_plans') {
-            // Edit the payment method message back to the plans message (which is the photo + caption)
             await updateUser(tgId, { stage: 'stage_2_plans' });
             
             const photoFileId = await getSetting('promo_photo_file_id');
@@ -856,7 +622,274 @@ Zoom Pro Pricing and Plan
             ];
             
             try {
-                // We are editing the caption of a photo message
+                await bot.editMessageMedia({
+                    type: 'photo',
+                    media: photoFileId,
+                    caption: text,
+                    parse_mode: 'HTML'
+                }, {
+                    chat_id: msg.chat.id,
+                    message_id: msg.message_id,
+                    reply_markup: { inline_keyboard }
+                });
+            } catch (e) {
+                 console.error("editMessageMedia error:", e);
+                 bot.deleteMessage(msg.chat.id, msg.message_id).catch();
+                 bot.sendPhoto(msg.chat.id, photoFileId, { caption: text, parse_mode: 'HTML', reply_markup: { inline_keyboard }});
+            }
+            bot.answerCallbackQuery(callbackQuery.id);
+        }
+        else if (data.startsWith('buy_coin:')) {
+            const planKey = data.split(':')[1];
+            const plan = plans[planKey];
+            if (!plan) return bot.answerCallbackQuery(callbackQuery.id);
+            
+            await updateUser(tgId, { 
+                stage: 'stage_3_payment', 
+                temp_data: { plan: plan.name, days: plan.days, coins: plan.coins, price: plan.price }
+            });
+
+            const text = `
+Zoom Coin
+🛍️: ${plan.name}
+🗓️: ${plan.days} Days
+🪙: ${plan.coins} Coins
+💰: ${plan.price} ks
+
+ဝယ်ယူရန် Payment ရွေးချယ်ပါ။
+အခြားသော Mobile Banking နှင့် အခြား Payment Method များအတွက် @touzainanboku051226 သို့ဆက်သွယ်ပါ။
+            `;
+            const inline_keyboard = [
+                [
+                    { text: "WavePay", callback_data: "pay:WavePay" },
+                    { text: "KBZPay", callback_data: "pay:KBZPay" }
+                ],
+                [
+                    { text: "AYAPay", callback_data: "pay:AYAPay" },
+                    { text: "UABPay", callback_data: "pay:UABPay" }
+                ],
+                [ { text: "⬅️ Back", callback_data: "back_to_plans" } ]
+            ];
+            
+            bot.editMessageCaption(text, {
+                chat_id: msg.chat.id,
+                message_id: msg.message_id,
+                reply_markup: { inline_keyboard }
+            });
+
+            bot.answerCallbackQuery(callbackQuery.id);
+        }
+        else if (data.startsWith('pay:')) {
+            const paymentType = data.split(':')[1];
+            const paymentInfo = paymentDetails[paymentType];
+            const tempOrder = user.temp_data;
+            
+            if (!paymentInfo || !tempOrder || !tempOrder.plan) {
+                 bot.answerCallbackQuery(callbackQuery.id, { text: "Error. Please /start again." });
+                 return;
+            }
+
+            await updateUser(tgId, { stage: 'awaiting_payment_proof' });
+
+            const text = `
+🛍️: ${tempOrder.plan}
+🗓️: ${tempOrder.days} Days
+🪙: ${tempOrder.coins} Coins
+💰: ${tempOrder.price} ks
+
+ငွေလက်ခံနံပါတ်အား ${tempOrder.price} ks တိတိလွှဲပေးပါ။
+
+<b>${paymentType}</b>
+${paymentInfo}
+
+သတိ - Note မှာ Zoom Pro ဟုရေးပေးပါ
+
+ငွေလွှဲပြေစာ (Screenshot) အားပေးပို့ပေးပါ။
+            `;
+            const inline_keyboard = [[ { text: "⬅️ Back", callback_data: `buy_coin:${tempOrder.plan}` } ]];
+            
+            bot.editMessageCaption(text, {
+                chat_id: msg.chat.id,
+                message_id: msg.message_id,
+                parse_mode: 'HTML',
+                reply_markup: { inline_keyboard }
+            });
+
+            bot.answerCallbackQuery(callbackQuery.id);
+        }
+        else if (data === 'buy_license_prompt') {
+            await updateUser(tgId, { stage: 'prompt_email', temp_data: {} });
+            bot.sendMessage(tgId, "လူကြီးမင်း၏ emailအားပို့ပေးပါ။");
+            bot.deleteMessage(msg.chat.id, msg.message_id); // clean up button
+            bot.answerCallbackQuery(callbackQuery.id);
+        }
+        else if (data.startsWith('select_license:')) {
+            const planKey = data.split(':')[1];
+            const plan = plans[planKey];
+            const email = user.temp_data.email;
+            
+            if (!plan || !email) return bot.answerCallbackQuery(callbackQuery.id, {text: "Error, please /zoom again."});
+
+            // *** MODIFIED: Only CHECK balance, don't deduct ***
+            if (user.coin_balance < plan.coins) {
+                bot.answerCallbackQuery(callbackQuery.id, { 
+                    text: `Insufficient balance. You need ${plan.coins} coins, but you only have ${user.coin_balance}.`,
+                    show_alert: true 
+                });
+                return;
+            }
+            
+            await updateUser(tgId, { 
+                stage: 'confirming_license',
+                temp_data: { ...user.temp_data, ...plan } // Spread the whole plan object
+            });
+
+            const expiryDate = moment().tz(MYANMAR_TZ).add(plan.days, 'days').format("DD/MM/YY");
+            const text = `
+Zoom License
+✉️: ${email}
+🛍️: ${plan.name}
+🪙: ${plan.coins} Coin
+🗓️: ${plan.days} Days
+
+ယခုဝယ်ယူပါက ကုန်ဆုံးမည့်သတ်တမ်း - ${expiryDate}
+
+ဝယ်ယူလိုပါက Confirm ကိုနှိပ်ပေးပါ
+            `;
+            const inline_keyboard = [
+                [ { text: "✅ Confirm", callback_data: "confirm_license_purchase" } ],
+                [ { text: "⬅️ Back", callback_data: "back_to_license_plan_selection" } ]
+            ];
+            
+            bot.editMessageText(text, {
+                chat_id: msg.chat.id,
+                message_id: msg.message_id,
+                reply_markup: { inline_keyboard }
+            });
+            bot.answerCallbackQuery(callbackQuery.id);
+        }
+        else if (data === 'confirm_license_purchase') {
+            const licenseData = user.temp_data;
+            if (!licenseData || !licenseData.email || !licenseData.coins) {
+                return bot.answerCallbackQuery(callbackQuery.id, {text: "Error, please /zoom again."});
+            }
+            
+            // 1. *** MODIFIED: Final balance check, but NO deduction ***
+            if (user.coin_balance < licenseData.coins) {
+                 return bot.answerCallbackQuery(callbackQuery.id, { text: `Insufficient balance.`, show_alert: true });
+            }
+
+            // 2. *** REMOVED: Coin deduction (moved to admin) ***
+            // await supabase.rpc('decrement_coin_balance', ...);
+
+            // 3. Create license entry (still 'pending')
+            const expires_at = moment().tz(MYANMAR_TZ).add(licenseData.days, 'days').toISOString();
+            
+            const { data: newLicense, error } = await supabase
+                .from('licenses')
+                .insert({
+                    user_id: tgId,
+                    email: licenseData.email,
+                    plan_name: licenseData.name,
+                    coins_spent: licenseData.coins,
+                    days: licenseData.days,
+                    status: 'pending',
+                    expires_at: expires_at
+                })
+                .select()
+                .single();
+
+            if (error) {
+                console.error("Error creating license:", error);
+                // No refund needed, just notify
+                bot.editMessageText("License order failed. Please try again.", {
+                    chat_id: msg.chat.id,
+                    message_id: msg.message_id
+                });
+                return bot.answerCallbackQuery(callbackQuery.id, {text: "Error creating license."});
+            }
+            
+            // 4. Send to admin group
+            const groupId = await getSetting('group_id');
+            const topicId = await getSetting('license_topic_id');
+            const adminCaption = `
+Zoom License (Pending)
+🚹: ${user.first_name}
+🔗: <a href="tg://user?id=${user.tg_id}">Link to Profile</a>
+👤: ${user.username ? `@${user.username}` : 'N_A'}
+🆔: ${user.tg_id}
+
+Zoom License
+✉️: ${licenseData.email}
+🛍️: ${licenseData.name}
+🪙: ${licenseData.coins} Coin
+🗓️: ${licenseData.days} Days
+            `;
+            // *** MODIFIED: Simplified decline callback (no coin amount needed) ***
+            const admin_keyboard = [[
+                { text: "✅ Finished", callback_data: `admin_finish_license:${tgId}:${newLicense.license_id}` },
+                { text: "❌ Decline", callback_data: `admin_decline_license:${tgId}:${newLicense.license_id}` }
+            ]];
+
+            try {
+                 const sentAdminMsg = await bot.sendMessage(groupId, adminCaption, {
+                    parse_mode: 'HTML',
+                    message_thread_id: topicId,
+                    reply_markup: { inline_keyboard: admin_keyboard }
+                });
+                 await supabase.from('licenses').update({ license_message_id: sentAdminMsg.message_id }).eq('license_id', newLicense.license_id);
+
+            } catch (e) { console.error("Error sending license to admin:", e); }
+
+            // 5. Notify user
+            bot.editMessageText("Zoom License အား Orderတင်ပြီးပါပြီ။ ခေတ္တခဏစောင့်ဆိုင်းပေးပါ။", {
+                chat_id: msg.chat.id,
+                message_id: msg.message_id,
+                reply_markup: { inline_keyboard: [] }
+            });
+            
+            // 6. Clear stage
+            await updateUser(tgId, { stage: 'start', temp_data: {} });
+            bot.answerCallbackQuery(callbackQuery.id);
+        }
+        
+        // --- Back Buttons Logic ---
+        
+        else if (data === 'back_to_start') {
+            await showStartMenu(msg.chat.id, callbackQuery.from, msg.message_id);
+            bot.answerCallbackQuery(callbackQuery.id);
+        }
+        else if (data === 'back_to_plans') {
+            await updateUser(tgId, { stage: 'stage_2_plans' });
+            
+            const photoFileId = await getSetting('promo_photo_file_id');
+            if (!photoFileId) {
+                bot.answerCallbackQuery(callbackQuery.id, { text: "Error: Photo not set by admin." });
+                return;
+            }
+
+            const text = `
+Zoom Pro ဝယ်ယူရာတွင် ကျွန်တော်တို့ဖက်မှ အကောင်းဆုံးဝန်ဆောင်မှုပေးထားပါတယ်ခင်ဗျာ။
+
+<b>[Zoom Bot ကိုဘယ်လိုအသုံးပြုမလဲ။]</b>
+... (full "how to" text) ...
+Zoom Coin လက်ကျန်စစ်ဆေးလိုပါက /balance ဟုပေးပို့၍ စစ်ဆေးနိုင်ပါသည်။
+
+Zoom Pro Pricing and Plan
+            `;
+            const inline_keyboard = [
+                [
+                    { text: "1Month", callback_data: "buy_coin:1Month" },
+                    { text: "3Months", callback_data: "buy_coin:3Months" }
+                ],
+                [
+                    { text: "6Months", callback_data: "buy_coin:6Months" },
+                    { text: "12Months", callback_data: "buy_coin:12Months" }
+                ],
+                [ { text: "⬅️ Back", callback_data: "back_to_start" } ]
+            ];
+            
+            try {
                 await bot.editMessageCaption(text, {
                     chat_id: msg.chat.id,
                     message_id: msg.message_id,
@@ -869,7 +902,6 @@ Zoom Pro Pricing and Plan
             bot.answerCallbackQuery(callbackQuery.id);
         }
         else if (data === 'back_to_license_plan_selection') {
-            // Edit the "Confirm License" message back to "Select Plan"
             const email = user.temp_data.email;
             if (!email) { 
                 bot.answerCallbackQuery(callbackQuery.id, { text: "Error. Please /zoom again."});
@@ -892,7 +924,7 @@ Zoom Pro Pricing and Plan
                 [ { text: "⬅️ Back", callback_data: "back_to_email_prompt" } ]
             ];
             
-            await updateUser(tgId, { stage: 'selecting_license_plan' }); // Keep temp_data
+            await updateUser(tgId, { stage: 'selecting_license_plan' });
             
             bot.editMessageText(text, {
                 chat_id: msg.chat.id,
@@ -902,7 +934,6 @@ Zoom Pro Pricing and Plan
             bot.answerCallbackQuery(callbackQuery.id);
         }
         else if (data === 'back_to_email_prompt') {
-            // Edit the "Select Plan" message back to "Send Email"
             await updateUser(tgId, { stage: 'prompt_email', temp_data: {} });
             bot.editMessageText("လူကြီးမင်း၏ emailအားပို့ပေးပါ။", {
                 chat_id: msg.chat.id,
@@ -998,5 +1029,4 @@ Expired On: ${formatMyanmarTime(license.expires_at)}
 setInterval(checkExpirations, 3600 * 1000); 
 checkExpirations(); // Run once on start
 
-console.log("Bot (v2 with Back Buttons) is running...");
-            
+console.log("Bot (v3 with updated logic) is running...");
