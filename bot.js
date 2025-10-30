@@ -255,6 +255,8 @@ bot.onText(/\/zoom/, async (msg) => {
     await updateUser(tgId, { stage: 'prompt_email', temp_data: {} });
     bot.sendMessage(msg.chat.id, "လူကြီးမင်း၏ emailအားပို့ပေးပါ။");
 });
+
+
 // -----------------------------------------------------------------
 // Part 2: Message Handlers and Callback Query Logic
 // -----------------------------------------------------------------
@@ -321,7 +323,7 @@ Order (Pending)
 🚹: ${user.first_name}
 🔗: <a href="tg://user?id=${user.tg_id}">Link to Profile</a>
 👤: ${user.username ? `@${user.username}` : 'N/A'}
-🆔: ${user.tgId}
+🆔: ${user.tg_id}
 
 Order Info
 🛍️: ${tempOrder.plan}
@@ -385,7 +387,6 @@ Order Info
         }
     }
 });
-
 
 // --- Callback Query Handler (Button Clicks) ---
 bot.on('callback_query', async (callbackQuery) => {
@@ -695,7 +696,7 @@ Zoom Pro နှင့်သက်ဆိုင်သော Note များလ�
             // Save plan to temp_data
             await updateUser(tgId, { 
                 stage: 'confirming_license',
-                temp_data: { ...user.temp_data, ...plan }
+                temp_data: { ...user.temp_data, ...plan } // Spread the whole plan object
             });
 
             const expiryDate = moment().tz(MYANMAR_TZ).add(plan.days, 'days').format("DD/MM/YY");
@@ -723,24 +724,89 @@ Zoom License
             bot.answerCallbackQuery(callbackQuery.id);
         }
         else if (data === 'confirm_license_purchase') {
-            // ... (No change to this logic, it's the final step) ...
-            // (Copying from original)
             const licenseData = user.temp_data;
             if (!licenseData || !licenseData.email || !licenseData.coins) {
                 return bot.answerCallbackQuery(callbackQuery.id, {text: "Error, please /zoom again."});
             }
+            
+            // 1. Check balance again
             if (user.coin_balance < licenseData.coins) {
                  return bot.answerCallbackQuery(callbackQuery.id, { text: `Insufficient balance.`, show_alert: true });
             }
+
+            // 2. Deduct coins
             await supabase.rpc('decrement_coin_balance', { user_id_in: tgId, coins_to_subtract: licenseData.coins });
+
+            // 3. Create license entry
             const expires_at = moment().tz(MYANMAR_TZ).add(licenseData.days, 'days').toISOString();
-            const { data: newLicense, error } = await supabase.from('licenses').insert({ ... }).select().single(); // (omitted for brevity)
-            // ... (all admin notifications) ...
+            
+            // ----- THIS IS THE CORRECTED BLOCK -----
+            const { data: newLicense, error } = await supabase
+                .from('licenses')
+                .insert({
+                    user_id: tgId,
+                    email: licenseData.email,
+                    plan_name: licenseData.name, // Use .name from the spread plan object
+                    coins_spent: licenseData.coins,
+                    days: licenseData.days,
+                    status: 'pending',
+                    expires_at: expires_at
+                })
+                .select()
+                .single();
+            // ----- END OF CORRECTED BLOCK -----
+
+            if (error) {
+                console.error("Error creating license:", error);
+                // Refund coins if insert fails
+                await supabase.rpc('increment_coin_balance', { user_id_in: tgId, coins_to_add: licenseData.coins });
+                bot.editMessageText("License order failed. Your coins have been refunded.", {
+                    chat_id: msg.chat.id,
+                    message_id: msg.message_id
+                });
+                return bot.answerCallbackQuery(callbackQuery.id, {text: "Error creating license. Coins refunded."});
+            }
+            
+            // 4. Send to admin group
+            const groupId = await getSetting('group_id');
+            const topicId = await getSetting('license_topic_id');
+            const adminCaption = `
+Zoom License (Pending)
+🚹: ${user.first_name}
+🔗: <a href="tg://user?id=${user.tg_id}">Link to Profile</a>
+👤: ${user.username ? `@${user.username}` : 'N_A'}
+🆔: ${user.tg_id}
+
+Zoom License
+✉️: ${licenseData.email}
+🛍️: ${licenseData.name}
+🪙: ${licenseData.coins} Coin
+🗓️: ${licenseData.days} Days
+            `;
+            const admin_keyboard = [[
+                { text: "✅ Finished", callback_data: `admin_finish_license:${tgId}:${newLicense.license_id}` },
+                { text: "❌ Decline", callback_data: `admin_decline_license:${tgId}:${newLicense.license_id}:${licenseData.coins}` }
+            ]];
+
+            try {
+                 const sentAdminMsg = await bot.sendMessage(groupId, adminCaption, {
+                    parse_mode: 'HTML',
+                    message_thread_id: topicId,
+                    reply_markup: { inline_keyboard: admin_keyboard }
+                });
+                 // Save admin message_id to license table for future reference
+                 await supabase.from('licenses').update({ license_message_id: sentAdminMsg.message_id }).eq('license_id', newLicense.license_id);
+
+            } catch (e) { console.error("Error sending license to admin:", e); }
+
+            // 5. Notify user
             bot.editMessageText("Zoom License အား Orderတင်ပြီးပါပြီ။ ခေတ္တခဏစောင့်ဆိုင်းပေးပါ။", {
                 chat_id: msg.chat.id,
                 message_id: msg.message_id,
                 reply_markup: { inline_keyboard: [] }
             });
+            
+            // 6. Clear stage
             await updateUser(tgId, { stage: 'start', temp_data: {} });
             bot.answerCallbackQuery(callbackQuery.id);
         }
@@ -756,12 +822,27 @@ Zoom License
             // Edit the payment method message back to the plans message (which is the photo + caption)
             await updateUser(tgId, { stage: 'stage_2_plans' });
             
-            const photoFileId = await getSetting('promo_photo_file_id'); // Assume it's still set
+            const photoFileId = await getSetting('promo_photo_file_id');
+            if (!photoFileId) {
+                bot.answerCallbackQuery(callbackQuery.id, { text: "Error: Photo not set by admin." });
+                return;
+            }
+
             const text = `
 Zoom Pro ဝယ်ယူရာတွင် ကျွန်တော်တို့ဖက်မှ အကောင်းဆုံးဝန်ဆောင်မှုပေးထားပါတယ်ခင်ဗျာ။
-... (full "how to" text) ...
+
+<b>[Zoom Bot ကိုဘယ်လိုအသုံးပြုမလဲ။]</b>
+
+လူကြီးမင်းအနေနဲ့ Zoom Coin အားအရင်ဝယ်ယူရပါမယ်ခင်ဗျ။ (Zoom Coin ၁ ခုလျှင် Zoom License အား 14 ရက်ကြာအသုံးပြုနိုင်ပါသည်။)
+
+မိမိအသုံးပြုလိုသောနေ့တွင် ယခု Bot သို့ /zoom ဟုပေးပို့၍ အသုံးပြုနိုင်ပါသည်။
+
+Coin 1 ခုလျှင် ၁၄ ရက်သာ Zoom License အားရရှိမည်ဖြစ်ပြီး မိမိထပ်မံ့အသုံးပြုလိုလျှင် အထက်တွင်ပြထားသည့်အတိုင်း ပြန်လည်ပြုလုပ်၍အသုံးပြုနိုင်ပါသည်။
+
+Zoom Coin လက်ကျန်စစ်ဆေးလိုပါက /balance ဟုပေးပို့၍ စစ်ဆေးနိုင်ပါသည်။
+
 Zoom Pro Pricing and Plan
-            `; // (Note: You can optimize this by not repeating the text block)
+            `;
             const inline_keyboard = [
                 [
                     { text: "1Month", callback_data: "buy_coin:1Month" },
@@ -774,18 +855,26 @@ Zoom Pro Pricing and Plan
                 [ { text: "⬅️ Back", callback_data: "back_to_start" } ]
             ];
             
-            bot.editMessageCaption(text, {
-                chat_id: msg.chat.id,
-                message_id: msg.message_id,
-                parse_mode: 'HTML',
-                reply_markup: { inline_keyboard }
-            });
+            try {
+                // We are editing the caption of a photo message
+                await bot.editMessageCaption(text, {
+                    chat_id: msg.chat.id,
+                    message_id: msg.message_id,
+                    parse_mode: 'HTML',
+                    reply_markup: { inline_keyboard }
+                });
+            } catch (e) {
+                console.error("Back to plans (edit caption) failed:", e.message);
+            }
             bot.answerCallbackQuery(callbackQuery.id);
         }
         else if (data === 'back_to_license_plan_selection') {
             // Edit the "Confirm License" message back to "Select Plan"
             const email = user.temp_data.email;
-            if (!email) { /* error handling */ }
+            if (!email) { 
+                bot.answerCallbackQuery(callbackQuery.id, { text: "Error. Please /zoom again."});
+                return;
+            }
 
             const text = `
 ✉️: ${email}
@@ -830,13 +919,84 @@ Zoom Pro Pricing and Plan
 });
 
 // --- Scheduled Task (Check Expirations) ---
-// (No changes to this part)
 async function checkExpirations() {
     console.log("Running expiration check...");
-    // ... (logic from original code) ...
+    const now = moment().tz(MYANMAR_TZ);
+    const oneDayFromNow = moment(now).add(1, 'day');
+
+    // 1. Find licenses expiring soon for reminder
+    const { data: expiringSoon, error: soonError } = await supabase
+        .from('licenses')
+        .select('*')
+        .eq('status', 'active')
+        .eq('reminded', false)
+        .lte('expires_at', oneDayFromNow.toISOString())
+        .gte('expires_at', now.toISOString());
+
+    if (soonError) console.error("Error fetching expiring soon:", soonError);
+
+    if (expiringSoon) {
+        for (const license of expiringSoon) {
+            const reminderMsg = `
+✉️: ${license.email}
+🛍️: ${license.plan_name}
+🪙: ${license.coins_spent} Coin
+🗓️: ${license.days} Days
+
+မကြာမီသတ်တမ်းကုန်ဆုံးပါတော့မည်။ ထပ်မံသက်တမ်းတိုးလိုပါက /start ကိုနှိပ်ကာ Zoom Coinများဝယ်ယူနိုင်ပါသည်။
+            `;
+            try {
+                bot.sendMessage(license.user_id, reminderMsg);
+                await supabase.from('licenses').update({ reminded: true }).eq('license_id', license.license_id);
+            } catch (e) { console.error("Error sending reminder:", e); }
+        }
+    }
+
+    // 2. Find licenses that are now expired
+    const { data: expired, error: expiredError } = await supabase
+        .from('licenses')
+        .select('*, users(first_name, username)') // Join with users table
+        .eq('status', 'active')
+        .lte('expires_at', now.toISOString());
+    
+    if (expiredError) console.error("Error fetching expired:", expiredError);
+
+    if (expired) {
+        const groupId = await getSetting('group_id');
+        const expiredTopicId = await getSetting('license_expired_topic_id');
+        const finishedTopicId = await getSetting('license_finished_topic_id');
+
+        for (const license of expired) {
+            await supabase.from('licenses').update({ status: 'expired' }).eq('license_id', license.license_id);
+            
+            if (groupId && expiredTopicId) {
+                // Log to expired topic
+                const userName = license.users ? license.users.first_name : 'Unknown User';
+                const userUsername = license.users ? license.users.username : 'N/A';
+                
+                const expiredLog = `
+License (Expired)
+🚹: ${userName}
+👤: @${userUsername}
+🆔: ${license.user_id}
+✉️: ${license.email}
+🛍️: ${license.plan_name}
+Expired On: ${formatMyanmarTime(license.expires_at)}
+                `;
+                try {
+                    bot.sendMessage(groupId, expiredLog, { 
+                        message_thread_id: expiredTopicId,
+                        parse_mode: 'HTML'
+                    });
+                } catch(e) { console.error("Error logging expired license:", e); }
+            }
+        }
+    }
 }
 
+// Run the check every hour
 setInterval(checkExpirations, 3600 * 1000); 
 checkExpirations(); // Run once on start
 
 console.log("Bot (v2 with Back Buttons) is running...");
+            
