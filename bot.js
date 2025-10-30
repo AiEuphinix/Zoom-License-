@@ -344,7 +344,6 @@ Order Info
                     reply_markup: { inline_keyboard }
                 });
                 
-                // Save admin message_id to order table
                 await supabase.from('orders').update({ payment_message_id: sentMsg.message_id }).eq('order_id', newOrder.order_id);
 
             } catch (e) { console.error("Error sending order to admin:", e); }
@@ -356,7 +355,6 @@ Order Info
     // --- Text Handler ---
     else if (msg.text) {
         if (stage === 'prompt_email') {
-            // Basic email validation
             if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(msg.text)) {
                 bot.sendMessage(tgId, "Email format မမှန်ပါ။ Email အမှန်ကိုပြန်ပို့ပေးပါ။");
                 return;
@@ -379,7 +377,6 @@ Order Info
                 [ { text: "⬅️ Back", callback_data: "back_to_email_prompt" } ]
             ];
             
-            // Save email to temp_data
             await updateUser(tgId, { stage: 'selecting_license_plan', temp_data: { email: email } });
             bot.sendMessage(tgId, text, { reply_markup: { inline_keyboard } });
         }
@@ -415,13 +412,25 @@ bot.on('callback_query', async (callbackQuery) => {
             if (action === 'admin_accept_order') {
                 const coinsToAdd = parseInt(rest[0]);
                 
-                // 1. Update user balance
-                await supabase.rpc('increment_coin_balance', { user_id_in: userId, coins_to_add: coinsToAdd });
+                // 1. Update user balance (WITH ERROR CHECKING)
+                const { error: rpcError } = await supabase.rpc('increment_coin_balance', { 
+                    user_id_in: userId, 
+                    coins_to_add: coinsToAdd 
+                });
+
+                if (rpcError) {
+                    console.error("Supabase RPC Error (increment_coin_balance):", rpcError);
+                    bot.answerCallbackQuery(callbackQuery.id, { 
+                        text: "Error: Failed to update balance. Check logs.",
+                        show_alert: true 
+                    });
+                    return; 
+                }
                 
                 // 2. Update order status
                 await supabase.from('orders').update({ status: 'accepted' }).eq('order_id', orderId);
 
-                // 3. Edit message in order topic (Update caption, remove buttons)
+                // 3. Edit message in order topic
                 await bot.editMessageCaption(msg.caption.replace("Order (Pending)", "Order (✅ Accepted)"), {
                     chat_id: msg.chat.id,
                     message_id: msg.message_id,
@@ -430,15 +439,19 @@ bot.on('callback_query', async (callbackQuery) => {
                 });
 
                 // 4. Forward to finished topic
-                const finishedTopicId = await getSetting('order_finished_topic_id');
-                if (finishedTopicId) {
-                    bot.forwardMessage(msg.chat.id, msg.chat.id, msg.message_id, { message_thread_id: finishedTopicId });
+                try {
+                    const finishedTopicId = await getSetting('order_finished_topic_id');
+                    if (finishedTopicId) {
+                        await bot.forwardMessage(msg.chat.id, msg.chat.id, msg.message_id, { message_thread_id: finishedTopicId });
+                    }
+                } catch (fwdError) {
+                    console.error("Failed to forward ACCEPTED order:", fwdError.message);
                 }
                 
-                // 5. *** NEW: Delete from original Order Topic ***
+                // 5. Delete from original Order Topic
                 await bot.deleteMessage(msg.chat.id, msg.message_id);
 
-                // 6. Notify user
+                // 6. ***** START: MODIFIED NOTIFICATION (Combined Message) *****
                 const successMsg = `
 Zoom Coin - [${coinsToAdd}] အားထည့်သွင်းပြီးပါပြီ။
 
@@ -448,34 +461,34 @@ Zoom Coin - [${coinsToAdd}] အားထည့်သွင်းပြီးပ�
 
 ကျွန်တော်တို့၏ Telegram Channel
 https://t.me/KoKos_Daily_Dose_of_Madness
+
+Zoom License ကိုဝယ်ယူလိုပါက (ဝယ်ယူရန်) ကိုနှိပ်ပေးပါ။
                 `;
-                bot.sendMessage(userId, successMsg);
                 
-                const followUpMsg = "Zoom License ကိုဝယ်ယူလိုပါက (ဝယ်ယူရန်) ကိုနှိပ်ပေးပါ။";
-                bot.sendMessage(userId, followUpMsg, {
+                // Send the combined message WITH the button
+                bot.sendMessage(userId, successMsg, {
                     reply_markup: {
                         inline_keyboard: [[ { text: "ဝယ်ယူရန်", callback_data: "buy_license_prompt" } ]]
                     }
                 });
+                // ***** END: MODIFIED NOTIFICATION *****
                 
                 bot.answerCallbackQuery(callbackQuery.id, { text: "Order Accepted!" });
             }
             else if (action === 'admin_decline_order') {
-                // Edit message, remove buttons, then delete
                 await bot.editMessageCaption(msg.caption.replace("Order (Pending)", "Order (❌ Declined)"), {
                     chat_id: msg.chat.id,
                     message_id: msg.message_id,
                     parse_mode: 'HTML',
                     reply_markup: { inline_keyboard: [] }
                 });
-                // Optional: forward to a "declined" topic if needed
                 await bot.deleteMessage(msg.chat.id, msg.message_id);
                 
                 bot.sendMessage(userId, "Your order has been declined. Please contact admin.");
                 bot.answerCallbackQuery(callbackQuery.id, { text: "Order Declined!" });
             }
             else if (action === 'admin_finish_license') {
-                const licenseId = parseInt(orderIdStr); // Reusing variable
+                const licenseId = parseInt(orderIdStr);
 
                 // 1. Get license details
                 const { data: license, error: licenseError } = await supabase
@@ -496,7 +509,6 @@ https://t.me/KoKos_Daily_Dose_of_Madness
                 
                 if (userError || !licenseUser) return bot.answerCallbackQuery(callbackQuery.id, { text: "User not found."});
 
-                // Check if user STILL has enough coins
                 if (licenseUser.coin_balance < license.coins_spent) {
                     return bot.answerCallbackQuery(callbackQuery.id, { 
                         text: `Failed: User only has ${licenseUser.coin_balance} coins. (Needed ${license.coins_spent}).`,
@@ -504,13 +516,25 @@ https://t.me/KoKos_Daily_Dose_of_Madness
                     });
                 }
 
-                // 3. *** NEW: Deduct coins from user ***
-                await supabase.rpc('decrement_coin_balance', { user_id_in: userId, coins_to_subtract: license.coins_spent });
+                // 3. Deduct coins from user (WITH ERROR CHECKING)
+                const { error: rpcError } = await supabase.rpc('decrement_coin_balance', { 
+                    user_id_in: userId, 
+                    coins_to_subtract: license.coins_spent 
+                });
+
+                if (rpcError) {
+                    console.error("Supabase RPC Error (decrement_coin_balance):", rpcError);
+                    bot.answerCallbackQuery(callbackQuery.id, { 
+                        text: "Error: Failed to deduct balance. Check logs.",
+                        show_alert: true 
+                    });
+                    return; 
+                }
 
                 // 4. Update license status
                 await supabase.from('licenses').update({ status: 'active' }).eq('license_id', licenseId);
 
-                // 5. Edit message in topic (Update caption, remove buttons)
+                // 5. Edit message in topic
                 await bot.editMessageCaption(msg.caption.replace("Zoom License (Pending)", "Zoom License (✅ Finished)"), {
                     chat_id: msg.chat.id,
                     message_id: msg.message_id,
@@ -519,12 +543,16 @@ https://t.me/KoKos_Daily_Dose_of_Madness
                 });
 
                 // 6. Forward to finished topic
-                const finishedTopicId = await getSetting('license_finished_topic_id');
-                if (finishedTopicId) {
-                    bot.forwardMessage(msg.chat.id, msg.chat.id, msg.message_id, { message_thread_id: finishedTopicId });
+                try {
+                    const finishedTopicId = await getSetting('license_finished_topic_id');
+                    if (finishedTopicId) {
+                        await bot.forwardMessage(msg.chat.id, msg.chat.id, msg.message_id, { message_thread_id: finishedTopicId });
+                    }
+                } catch (fwdError) {
+                    console.error("Failed to forward FINISHED license:", fwdError.message);
                 }
 
-                // 7. *** NEW: Delete from original License Topic ***
+                // 7. Delete from original License Topic
                 await bot.deleteMessage(msg.chat.id, msg.message_id);
 
                 // 8. Notify user
@@ -557,10 +585,8 @@ https://t.me/KoKos_Daily_Dose_of_Madness
             else if (action === 'admin_decline_license') {
                 const licenseId = parseInt(orderIdStr);
                 
-                // 1. Update license status
                 await supabase.from('licenses').update({ status: 'declined' }).eq('license_id', licenseId);
 
-                // 2. Edit message
                 await bot.editMessageCaption(msg.caption.replace("Zoom License (Pending)", "Zoom License (❌ Declined)"), {
                     chat_id: msg.chat.id,
                     message_id: msg.message_id,
@@ -568,10 +594,8 @@ https://t.me/KoKos_Daily_Dose_of_Madness
                     reply_markup: { inline_keyboard: [] }
                 });
 
-                // 3. Delete message
                 await bot.deleteMessage(msg.chat.id, msg.message_id);
 
-                // 4. Notify user
                 bot.sendMessage(userId, "Your License order has been declined. No coins were deducted. Please contact admin.");
                 bot.answerCallbackQuery(callbackQuery.id, { text: "License Declined!" });
             }
@@ -702,7 +726,7 @@ Zoom Coin
 <b>${paymentType}</b>
 ${paymentInfo}
 
-သတိ - Note မှာ Zoom Pro ဟုရေးပေးပါ
+သတိ - Note မှာ Zoom Pro ဟုရေးပို့ပေးပါ။
 
 ငွေလွှဲပြေစာ (Screenshot) အားပေးပို့ပေးပါ။
             `;
@@ -720,7 +744,7 @@ ${paymentInfo}
         else if (data === 'buy_license_prompt') {
             await updateUser(tgId, { stage: 'prompt_email', temp_data: {} });
             bot.sendMessage(tgId, "လူကြီးမင်း၏ emailအားပို့ပေးပါ။");
-            bot.deleteMessage(msg.chat.id, msg.message_id); // clean up button
+            bot.deleteMessage(msg.chat.id, msg.message_id); 
             bot.answerCallbackQuery(callbackQuery.id);
         }
         else if (data.startsWith('select_license:')) {
@@ -730,7 +754,6 @@ ${paymentInfo}
             
             if (!plan || !email) return bot.answerCallbackQuery(callbackQuery.id, {text: "Error, please /zoom again."});
 
-            // *** MODIFIED: Only CHECK balance, don't deduct ***
             if (user.coin_balance < plan.coins) {
                 bot.answerCallbackQuery(callbackQuery.id, { 
                     text: `Insufficient balance. You need ${plan.coins} coins, but you only have ${user.coin_balance}.`,
@@ -741,7 +764,7 @@ ${paymentInfo}
             
             await updateUser(tgId, { 
                 stage: 'confirming_license',
-                temp_data: { ...user.temp_data, ...plan } // Spread the whole plan object
+                temp_data: { ...user.temp_data, ...plan }
             });
 
             const expiryDate = moment().tz(MYANMAR_TZ).add(plan.days, 'days').format("DD/MM/YY");
@@ -774,13 +797,9 @@ Zoom License
                 return bot.answerCallbackQuery(callbackQuery.id, {text: "Error, please /zoom again."});
             }
             
-            // 1. *** MODIFIED: Final balance check, but NO deduction ***
             if (user.coin_balance < licenseData.coins) {
                  return bot.answerCallbackQuery(callbackQuery.id, { text: `Insufficient balance.`, show_alert: true });
             }
-
-            // 2. *** REMOVED: Coin deduction (moved to admin) ***
-            // await supabase.rpc('decrement_coin_balance', ...);
 
             // 3. Create license entry (still 'pending')
             const expires_at = moment().tz(MYANMAR_TZ).add(licenseData.days, 'days').toISOString();
@@ -801,7 +820,6 @@ Zoom License
 
             if (error) {
                 console.error("Error creating license:", error);
-                // No refund needed, just notify
                 bot.editMessageText("License order failed. Please try again.", {
                     chat_id: msg.chat.id,
                     message_id: msg.message_id
@@ -825,7 +843,6 @@ Zoom License
 🪙: ${licenseData.coins} Coin
 🗓️: ${licenseData.days} Days
             `;
-            // *** MODIFIED: Simplified decline callback (no coin amount needed) ***
             const admin_keyboard = [[
                 { text: "✅ Finished", callback_data: `admin_finish_license:${tgId}:${newLicense.license_id}` },
                 { text: "❌ Decline", callback_data: `admin_decline_license:${tgId}:${newLicense.license_id}` }
@@ -1029,4 +1046,4 @@ Expired On: ${formatMyanmarTime(license.expires_at)}
 setInterval(checkExpirations, 3600 * 1000); 
 checkExpirations(); // Run once on start
 
-console.log("Bot (v3 with updated logic) is running...");
+console.log("Bot (v5 - Message merge fix) is running...");
