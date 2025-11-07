@@ -31,7 +31,6 @@ const plans = {
     '3Months': { name: '3Months', days: 84, coins: 6, price: 45000 },
     '6Months': { name: '6Months', days: 168, coins: 13, price: 81000 },
     '12Months': { name: '12Months', days: 336, coins: 26, price: 149000 },
-    // *** NEW: Added 14-day plan for direct license purchase ***
     '14Days': { name: '14Days', days: 14, coins: 1 } 
 };
 
@@ -198,13 +197,15 @@ bot.onText(/\/setphoto/, async (msg) => {
     await updateUser(msg.from.id, { stage: 'awaiting_photo' });
     bot.sendMessage(msg.chat.id, "OK, Owner. Please send me the new promo photo.");
 });
-
-// --- NEW Owner Commands ---
 bot.onText(/\/support (.+)/, (msg, match) => {
     handleSetCommand(msg, 'support_topic_id', 'Support Topic ID');
 });
 bot.onText(/\/broadcast (.+)/, (msg, match) => {
     handleSetCommand(msg, 'broadcast_topic_id', 'Broadcast Topic ID');
+});
+// *** NEW: Bot Setting Topic Command ***
+bot.onText(/\/botsetting (.+)/, (msg, match) => {
+    handleSetCommand(msg, 'bot_setting_topic_id', 'Bot Setting Topic ID');
 });
 
 // --- User Commands ---
@@ -214,7 +215,6 @@ bot.onText(/\/start/, async (msg) => {
     if (!user) return;
 
     if (isNew) {
-        // *** MODIFIED: New User Alert Logic ***
         const groupId = await getSetting('group_id');
         const topicId = await getSetting('new_customer_topic_id');
         
@@ -226,18 +226,13 @@ New Customer Alert
 🆔: ${user.tg_id}
 🗓️: ${formatMyanmarTime()}
         `;
-
-        // Create list of targets
         const targets = [
-            { chatId: ownerAlertId, topicId: null }, // Owner ID
-            { chatId: adminAlertId, topicId: null }  // Admin ID
+            { chatId: ownerAlertId, topicId: null },
+            { chatId: adminAlertId, topicId: null }
         ];
-
         if (groupId && topicId) {
-            targets.push({ chatId: groupId, topicId: topicId }); // Group Topic
+            targets.push({ chatId: groupId, topicId: topicId });
         }
-
-        // Send to all targets
         for (const target of targets) {
             try {
                 await bot.sendMessage(target.chatId, alertMsg, {
@@ -248,7 +243,6 @@ New Customer Alert
                 console.error(`Failed to send new user alert to ${target.chatId}:`, e.message);
             }
         }
-        // *** END OF MODIFICATION ***
     }
     await showStartMenu(msg.chat.id, msg.from);
 });
@@ -271,24 +265,20 @@ bot.onText(/\/zoom/, async (msg) => {
     bot.sendMessage(msg.chat.id, "လူကြီးမင်း၏ emailအားပို့ပေးပါ။");
 });
 
-// --- NEW Admin Commands (Broadcast & Send) ---
+// --- Admin Commands (Broadcast & Send) ---
 async function startBroadcast(msg, type) {
     const groupId = await getSetting('group_id');
     const broadcastTopicId = await getSetting('broadcast_topic_id');
     if (!groupId || !broadcastTopicId || msg.chat.id.toString() !== groupId || msg.message_thread_id.toString() !== broadcastTopicId) {
         return bot.sendMessage(msg.chat.id, "This command can only be used in the broadcast topic.", { message_thread_id: msg.message_thread_id });
     }
-
     const isAdmin = await isChatAdmin(groupId, msg.from.id);
     if (!isAdmin) return;
-
     const admin_id = msg.from.id;
     if (broadcastJobs[admin_id]) {
         return bot.sendMessage(msg.chat.id, "You have a pending broadcast. Cancel it first.", { message_thread_id: broadcastTopicId });
     }
-
     broadcastJobs[admin_id] = { type: type, messages: [], chatId: msg.chat.id, topicId: broadcastTopicId };
-
     bot.sendMessage(msg.chat.id,
         "Broadcast mode started. Send me messages/photos to collect.\n\nPress '✅ Send Broadcast' when done.",
         {
@@ -302,24 +292,19 @@ async function startBroadcast(msg, type) {
         });
 }
 
-bot.onText(/\/broadcast1/, (msg) => startBroadcast(msg, 'copy')); // Indirect
-bot.onText(/\/broadcast2/, (msg) => startBroadcast(msg, 'forward')); // Direct
+bot.onText(/\/broadcast1/, (msg) => startBroadcast(msg, 'copy'));
+bot.onText(/\/broadcast2/, (msg) => startBroadcast(msg, 'forward'));
 
-// /send command
-bot.onText(/\/send (\d+) (.+)/s, async (msg, match) => { // 's' flag for multiline
+bot.onText(/\/send (\d+) (.+)/s, async (msg, match) => {
     const groupId = await getSetting('group_id');
     const supportTopicId = await getSetting('support_topic_id');
-    
     if (!groupId || !supportTopicId || msg.chat.id.toString() !== groupId || msg.message_thread_id.toString() !== supportTopicId) {
         return bot.sendMessage(msg.chat.id, "This command can only be used in the support topic.", { message_thread_id: msg.message_thread_id });
     }
-
     const isAdmin = await isChatAdmin(groupId, msg.from.id);
     if (!isAdmin) return;
-
     const targetUserId = match[1];
     const messageText = match[2];
-
     try {
         await bot.sendMessage(targetUserId, messageText);
         bot.sendMessage(msg.chat.id, `Message sent to ${targetUserId}.`, { message_thread_id: supportTopicId });
@@ -327,6 +312,181 @@ bot.onText(/\/send (\d+) (.+)/s, async (msg, match) => { // 's' flag for multili
         console.error("Error sending message:", e);
         bot.sendMessage(msg.chat.id, `Failed to send message: ${e.message}`, { message_thread_id: supportTopicId });
     }
+});
+
+// --- *** NEW: Bot Setting Topic Helper Functions *** ---
+
+// Helper function for batch sending (to avoid 4096 char limit)
+async function sendBatchedMessages(chatId, topicId, messages) {
+    const MESSAGE_LIMIT = 4096;
+    let currentMessage = "";
+
+    for (const message of messages) {
+        if (currentMessage.length + message.length + 1 > MESSAGE_LIMIT) {
+            try {
+                await bot.sendMessage(chatId, currentMessage, { 
+                    message_thread_id: topicId,
+                    parse_mode: 'HTML',
+                    disable_web_page_preview: true
+                });
+            } catch (e) { console.error("Error sending batched message:", e.message); }
+            currentMessage = message + "\n";
+        } else {
+            currentMessage += message + "\n";
+        }
+    }
+    // Send the last batch
+    if (currentMessage) {
+        try {
+            await bot.sendMessage(chatId, currentMessage, { 
+                message_thread_id: topicId,
+                parse_mode: 'HTML',
+                disable_web_page_preview: true
+            });
+        } catch (e) { console.error("Error sending last batched message:", e.message); }
+    }
+}
+
+// Security check helper for bot setting topic commands
+async function checkAdminInTopic(msg) {
+    const groupId = await getSetting('group_id');
+    const settingTopicId = await getSetting('bot_setting_topic_id');
+
+    if (!groupId || !settingTopicId || msg.chat.id.toString() !== groupId || msg.message_thread_id.toString() !== settingTopicId) {
+        bot.sendMessage(msg.chat.id, "This command can only be used in the Bot Setting topic.", { message_thread_id: msg.message_thread_id });
+        return false;
+    }
+    const isAdmin = await isChatAdmin(groupId, msg.from.id);
+    if (!isAdmin) {
+        bot.sendMessage(msg.chat.id, "You are not an admin.", { message_thread_id: msg.message_thread_id });
+        return false;
+    }
+    return true;
+}
+
+// --- *** NEW: Admin Commands (List, Balance, Refresh) *** ---
+
+bot.onText(/\/list/, async (msg) => {
+    if (!await checkAdminInTopic(msg)) return;
+
+    const topicId = await getSetting('bot_setting_topic_id');
+    bot.sendMessage(msg.chat.id, "Fetching user list... This may take a moment.", { message_thread_id: topicId });
+
+    const { data: users, error } = await supabase
+        .from('users')
+        .select('tg_id, first_name, username');
+        
+    if (error) {
+        console.error("Error fetching users for /list:", error);
+        return bot.sendMessage(msg.chat.id, "Error fetching users from DB.", { message_thread_id: topicId });
+    }
+    if (!users || users.length === 0) {
+        return bot.sendMessage(msg.chat.id, "No users found in database.", { message_thread_id: topicId });
+    }
+    
+    const userMessages = users.map(user => {
+        return `
+👤: <a href="tg://user?id=${user.tg_id}">${user.first_name || 'No Name'}</a>
+🔗: ${user.username ? `@${user.username}` : 'N/A'}
+🆔: \`${user.tg_id}\`
+--------------------`;
+    });
+
+    await sendBatchedMessages(msg.chat.id, topicId, userMessages);
+});
+
+bot.onText(/\/userbalance/, async (msg) => {
+    if (!await checkAdminInTopic(msg)) return;
+    
+    const topicId = await getSetting('bot_setting_topic_id');
+    bot.sendMessage(msg.chat.id, "Fetching user balances... This may take a moment.", { message_thread_id: topicId });
+
+    const { data: users, error } = await supabase
+        .from('users')
+        .select('tg_id, first_name, coin_balance')
+        .order('coin_balance', { ascending: false }); // Order by balance
+        
+    if (error) {
+        console.error("Error fetching users for /userbalance:", error);
+        return bot.sendMessage(msg.chat.id, "Error fetching users from DB.", { message_thread_id: topicId });
+    }
+    if (!users || users.length === 0) {
+        return bot.sendMessage(msg.chat.id, "No users found in database.", { message_thread_id: topicId });
+    }
+    
+    const userMessages = users.map(user => {
+        return `
+👤: <a href="tg://user?id=${user.tg_id}">${user.first_name || 'No Name'}</a>
+🪙: ${user.coin_balance || 0} Coins
+--------------------`;
+    });
+
+    await sendBatchedMessages(msg.chat.id, topicId, userMessages);
+});
+
+bot.onText(/\/loadnew/, async (msg) => {
+    if (!await checkAdminInTopic(msg)) return;
+
+    const topicId = await getSetting('bot_setting_topic_id');
+    bot.sendMessage(msg.chat.id, "Starting user data refresh... This will take time. Please wait.", { message_thread_id: topicId });
+
+    const { data: users, error } = await supabase
+        .from('users')
+        .select('tg_id, first_name, username');
+        
+    if (error || !users) {
+        return bot.sendMessage(msg.chat.id, "Error fetching users from DB.", { message_thread_id: topicId });
+    }
+
+    let updatedCount = 0;
+    let failedCount = 0;
+
+    for (const user of users) {
+        try {
+            const chat = await bot.getChat(user.tg_id);
+            const newFirstName = chat.first_name;
+            const newUsername = chat.username;
+
+            let updates = {};
+            if (newFirstName !== user.first_name) {
+                updates.first_name = newFirstName;
+            }
+            if (newUsername !== user.username) {
+                updates.username = newUsername || 'N/A';
+            }
+
+            if (Object.keys(updates).length > 0) {
+                const { error: updateError } = await supabase
+                    .from('users')
+                    .update(updates)
+                    .eq('tg_id', user.tg_id);
+                
+                if (updateError) {
+                    console.error(`Failed to update user ${user.tg_id}:`, updateError.message);
+                    failedCount++;
+                } else {
+                    updatedCount++;
+                }
+            }
+        } catch (e) {
+            console.error(`Failed to getChat for ${user.tg_id}:`, e.message);
+            // This often happens if the user blocked the bot.
+            if (e.response && e.response.statusCode === 403) {
+                 // User blocked the bot. We can't update them.
+            }
+            failedCount++;
+        }
+        await delay(500); // 500ms delay to avoid rate limits
+    }
+    
+    bot.sendMessage(msg.chat.id, 
+        `✅ User data refresh complete.
+        
+Total Users Checked: ${users.length}
+Users Updated: ${updatedCount}
+Users Failed (e.g., blocked bot): ${failedCount}`, 
+        { message_thread_id: topicId }
+    );
 });
 
 // -----------------------------------------------------------------
@@ -487,7 +647,7 @@ Order Info
             return;
         }
         
-        // *** MODIFIED: License Purchase Flow ***
+        // License Purchase Flow
         else if (msg.text && stage === 'prompt_email') {
             if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(msg.text)) {
                 bot.sendMessage(tgId, "Email format မမှန်ပါ။ Email အမှန်ကိုပြန်ပို့ပေးပါ။");
@@ -495,8 +655,7 @@ Order Info
             }
             const email = msg.text.trim();
             
-            // Define the 14-day plan
-            const plan = plans['14Days']; // Get plan from our global const
+            const plan = plans['14Days'];
             const expiryDate = moment().tz(MYANMAR_TZ).add(plan.days, 'days').format("DD/MM/YY");
 
             const text = `
@@ -513,7 +672,6 @@ Zoom License အားဝယ်ယူမည်ဆိုပါက Confirm နှ�
                 [{ text: "❌ Cancel", callback_data: "back_to_email_prompt" }]
             ];
             
-            // Save plan data to temp_data and set stage
             await updateUser(tgId, { 
                 stage: 'confirming_license', 
                 temp_data: { 
@@ -527,10 +685,15 @@ Zoom License အားဝယ်ယူမည်ဆိုပါက Confirm နှ�
             bot.sendMessage(tgId, text, { reply_markup: { inline_keyboard } });
             return;
         }
-        // *** END OF MODIFICATION ***
 
         // --- 4. Handle General Support Message (Default Case) ---
         if (groupId && supportTopicId) {
+            // Avoid forwarding messages from admins in the setting topic
+            const settingTopicId = await getSetting('bot_setting_topic_id');
+            if (msg.chat.id.toString() === groupId && msg.message_thread_id.toString() === settingTopicId) {
+                return; // Don't forward admin commands
+            }
+            
             try {
                 // 1. Copy customer's message to support topic (no "forwarded from")
                 const copiedMsg = await bot.copyMessage(groupId, msg.chat.id, msg.message_id, {
@@ -550,7 +713,6 @@ Reply to this message to chat with ${user.first_name}.
                 `;
                 await bot.sendMessage(groupId, handlerText, {
                     message_thread_id: supportTopicId,
-                    // reply_to_message_id: copiedMsg.message_id // Optional: reply to the copied msg
                 });
 
             } catch (e) {
@@ -594,7 +756,7 @@ async function sendBroadcast(admin_id, job) {
         `Broadcast complete.\n✅ Success: ${successCount}\n❌ Failed: ${failCount}`,
         { message_thread_id: job.topicId }
     );
-}
+        }
 
 // -----------------------------------------------------------------
 // Part 3/3: Callback Query Handler (Admin Logic)
@@ -791,7 +953,8 @@ https://t.me/KoKos_Daily_Dose_of_Madness
         }
         return;
     }
-// CONTINUE TO PART 4 IN NEXT BLOCK
+// CONTINUE TO PART 4
+
 // -----------------------------------------------------------------
 // Part 4/3: Callback Query (User Logic) & Scheduled Tasks
 // -----------------------------------------------------------------
@@ -898,21 +1061,15 @@ ${paymentInfo}
             bot.answerCallbackQuery(callbackQuery.id);
         }
         else if (data === 'buy_license_prompt') {
-            // This is used by the "Order Accepted" message AND the new "Renew" button
             await updateUser(tgId, { stage: 'prompt_email', temp_data: {} });
             bot.sendMessage(tgId, "လူကြီးမင်း၏ emailအားပို့ပေးပါ။");
             try {
-                // Delete the message that had the button (e.g., the renewal message)
                 bot.deleteMessage(msg.chat.id, msg.message_id); 
-            } catch (e) { /* ignore if delete fails */ }
+            } catch (e) { /* ignore */ }
             bot.answerCallbackQuery(callbackQuery.id);
         }
         
-        // *** REMOVED: `select_license` block is no longer needed ***
-        // else if (data.startsWith('select_license:')) { ... }
-
         else if (data === 'confirm_license_purchase') {
-            // This is now triggered directly after the email prompt
             const licenseData = user.temp_data;
             if (!licenseData || !licenseData.email || !licenseData.coins) {
                 return bot.answerCallbackQuery(callbackQuery.id, {text: "Error, please /zoom again."});
@@ -924,7 +1081,6 @@ ${paymentInfo}
                 });
             }
 
-            // 3. Create license entry
             const expires_at = moment().tz(MYANMAR_TZ).add(licenseData.days, 'days').toISOString();
             const { data: newLicense, error } = await supabase.from('licenses').insert({
                 user_id: tgId, email: licenseData.email, plan_name: licenseData.name,
@@ -939,7 +1095,6 @@ ${paymentInfo}
                 return bot.answerCallbackQuery(callbackQuery.id, {text: "Error creating license."});
             }
             
-            // 4. Send to admin group
             const groupId = await getSetting('group_id');
             const topicId = await getSetting('license_topic_id');
             const adminCaption = `
@@ -966,12 +1121,10 @@ Zoom License
                  await supabase.from('licenses').update({ license_message_id: sentAdminMsg.message_id }).eq('license_id', newLicense.license_id);
             } catch (e) { console.error("Error sending license to admin:", e); }
 
-            // 5. Notify user
             bot.editMessageText("Zoom License အား Orderတင်ပြီးပါပြီ။ ခေတ္တခဏစောင့်ဆိုင်းပေးပါ။", {
                 chat_id: msg.chat.id, message_id: msg.message_id, reply_markup: { inline_keyboard: [] }
             });
             
-            // 6. Clear stage
             await updateUser(tgId, { stage: 'start', temp_data: {} });
             bot.answerCallbackQuery(callbackQuery.id);
         }
@@ -1018,10 +1171,7 @@ Zoom Pro Pricing and Plan
             bot.answerCallbackQuery(callbackQuery.id);
         }
         
-        // *** REMOVED: `back_to_license_plan_selection` is no longer needed ***
-        
         else if (data === 'back_to_email_prompt') {
-            // This is now used by the 'Cancel' button on the 14-day confirm screen
             await updateUser(tgId, { stage: 'prompt_email', temp_data: {} });
             bot.editMessageText("လူကြီးမင်း၏ emailအားပို့ပေးပါ။", {
                 chat_id: msg.chat.id, message_id: msg.message_id, reply_markup: { inline_keyboard: [] }
@@ -1085,7 +1235,6 @@ async function checkExpirations() {
         for (const license of expired) {
             await supabase.from('licenses').update({ status: 'expired' }).eq('license_id', license.license_id);
             
-            // *** NEW: Send expiry notification to user with Renew button ***
             try {
                 const expiryMsg = `
 သင့်၏ Zoom License သတ်တမ်းကုန်ဆုံးသွားပါပြီ။
@@ -1103,7 +1252,6 @@ async function checkExpirations() {
             } catch (e) {
                 console.error("Error sending expired notification to user:", e.message);
             }
-            // *** END OF MODIFICATION ***
 
             if (groupId && expiredTopicId) {
                 // Log to expired topic
@@ -1134,6 +1282,5 @@ Expired On: ${formatMyanmarTime(license.expires_at)}
 setInterval(checkExpirations, 3600 * 1000); 
 checkExpirations(); // Run once on start
 
-console.log("Bot (v9 - 14Day Flow & Alerts) is running...");
-
-
+console.log("Bot (v10 - Bot Settings) is running...");
+    
