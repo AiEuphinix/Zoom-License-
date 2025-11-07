@@ -12,9 +12,10 @@ const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
 const botOwnerId = parseInt(process.env.BOT_OWNER_ID);
 
-// *** NEW: Admin IDs for Alerts ***
 const ownerAlertId = 1936169054;
 const adminAlertId = 7655451892;
+// *** NEW: Super Admin IDs for DM commands ***
+const superAdminIds = new Set([botOwnerId, ownerAlertId, adminAlertId]);
 
 const bot = new TelegramBot(token, { polling: true });
 const supabase = createClient(supabaseUrl, supabaseKey);
@@ -203,7 +204,6 @@ bot.onText(/\/support (.+)/, (msg, match) => {
 bot.onText(/\/broadcast (.+)/, (msg, match) => {
     handleSetCommand(msg, 'broadcast_topic_id', 'Broadcast Topic ID');
 });
-// *** NEW: Bot Setting Topic Command ***
 bot.onText(/\/botsetting (.+)/, (msg, match) => {
     handleSetCommand(msg, 'bot_setting_topic_id', 'Bot Setting Topic ID');
 });
@@ -314,7 +314,7 @@ bot.onText(/\/send (\d+) (.+)/s, async (msg, match) => {
     }
 });
 
-// --- *** NEW: Bot Setting Topic Helper Functions *** ---
+// --- *** Bot Setting Topic Helper Functions *** ---
 
 // Helper function for batch sending (to avoid 4096 char limit)
 async function sendBatchedMessages(chatId, topicId, messages) {
@@ -325,7 +325,7 @@ async function sendBatchedMessages(chatId, topicId, messages) {
         if (currentMessage.length + message.length + 1 > MESSAGE_LIMIT) {
             try {
                 await bot.sendMessage(chatId, currentMessage, { 
-                    message_thread_id: topicId,
+                    message_thread_id: topicId, // This is fine if topicId is undefined (for DMs)
                     parse_mode: 'HTML',
                     disable_web_page_preview: true
                 });
@@ -347,30 +347,49 @@ async function sendBatchedMessages(chatId, topicId, messages) {
     }
 }
 
-// Security check helper for bot setting topic commands
-async function checkAdminInTopic(msg) {
+// *** MODIFIED: Security check helper for bot setting topic commands OR DM ***
+async function isAuthorizedAdmin(msg) {
+    // Scenario 1: Check if it's a Super Admin in DM
+    if (msg.chat.type === 'private') {
+        if (superAdminIds.has(msg.from.id)) {
+            return true; // Authorized
+        } else {
+            bot.sendMessage(msg.chat.id, "You are not authorized for this command.");
+            return false; // Not authorized
+        }
+    }
+
+    // Scenario 2: Check if it's an Admin in the Bot Setting Topic
     const groupId = await getSetting('group_id');
     const settingTopicId = await getSetting('bot_setting_topic_id');
 
-    if (!groupId || !settingTopicId || msg.chat.id.toString() !== groupId || msg.message_thread_id.toString() !== settingTopicId) {
-        bot.sendMessage(msg.chat.id, "This command can only be used in the Bot Setting topic.", { message_thread_id: msg.message_thread_id });
-        return false;
+    if (groupId && settingTopicId && msg.chat.id.toString() === groupId && msg.message_thread_id.toString() === settingTopicId) {
+        const isAdmin = await isChatAdmin(groupId, msg.from.id);
+        if (isAdmin) {
+            return true; // Authorized (Group Admin in topic)
+        } else {
+            bot.sendMessage(msg.chat.id, "You are not an admin in this group.", { message_thread_id: msg.message_thread_id });
+            return false; // Not authorized
+        }
     }
-    const isAdmin = await isChatAdmin(groupId, msg.from.id);
-    if (!isAdmin) {
-        bot.sendMessage(msg.chat.id, "You are not an admin.", { message_thread_id: msg.message_thread_id });
-        return false;
+
+    // Scenario 3: Not in DM and not in the correct topic
+    if (msg.chat.type === 'supergroup' || msg.chat.type === 'group') {
+         bot.sendMessage(msg.chat.id, "This command can only be used in the Bot Setting topic or in DM.", { message_thread_id: msg.message_thread_id });
     }
-    return true;
+    return false;
 }
 
-// --- *** NEW: Admin Commands (List, Balance, Refresh) *** ---
+
+// --- *** Admin Commands (List, Balance, Refresh) *** ---
 
 bot.onText(/\/list/, async (msg) => {
-    if (!await checkAdminInTopic(msg)) return;
+    // Use new authorization check
+    if (!await isAuthorizedAdmin(msg)) return;
 
-    const topicId = await getSetting('bot_setting_topic_id');
-    bot.sendMessage(msg.chat.id, "Fetching user list... This may take a moment.", { message_thread_id: topicId });
+    // replyTopicId will be undefined in DM, which is correct
+    const replyTopicId = msg.message_thread_id; 
+    bot.sendMessage(msg.chat.id, "Fetching user list... This may take a moment.", { message_thread_id: replyTopicId });
 
     const { data: users, error } = await supabase
         .from('users')
@@ -378,10 +397,10 @@ bot.onText(/\/list/, async (msg) => {
         
     if (error) {
         console.error("Error fetching users for /list:", error);
-        return bot.sendMessage(msg.chat.id, "Error fetching users from DB.", { message_thread_id: topicId });
+        return bot.sendMessage(msg.chat.id, "Error fetching users from DB.", { message_thread_id: replyTopicId });
     }
     if (!users || users.length === 0) {
-        return bot.sendMessage(msg.chat.id, "No users found in database.", { message_thread_id: topicId });
+        return bot.sendMessage(msg.chat.id, "No users found in database.", { message_thread_id: replyTopicId });
     }
     
     const userMessages = users.map(user => {
@@ -392,14 +411,14 @@ bot.onText(/\/list/, async (msg) => {
 --------------------`;
     });
 
-    await sendBatchedMessages(msg.chat.id, topicId, userMessages);
+    await sendBatchedMessages(msg.chat.id, replyTopicId, userMessages);
 });
 
 bot.onText(/\/userbalance/, async (msg) => {
-    if (!await checkAdminInTopic(msg)) return;
+    if (!await isAuthorizedAdmin(msg)) return;
     
-    const topicId = await getSetting('bot_setting_topic_id');
-    bot.sendMessage(msg.chat.id, "Fetching user balances... This may take a moment.", { message_thread_id: topicId });
+    const replyTopicId = msg.message_thread_id;
+    bot.sendMessage(msg.chat.id, "Fetching user balances... This may take a moment.", { message_thread_id: replyTopicId });
 
     const { data: users, error } = await supabase
         .from('users')
@@ -408,10 +427,10 @@ bot.onText(/\/userbalance/, async (msg) => {
         
     if (error) {
         console.error("Error fetching users for /userbalance:", error);
-        return bot.sendMessage(msg.chat.id, "Error fetching users from DB.", { message_thread_id: topicId });
+        return bot.sendMessage(msg.chat.id, "Error fetching users from DB.", { message_thread_id: replyTopicId });
     }
     if (!users || users.length === 0) {
-        return bot.sendMessage(msg.chat.id, "No users found in database.", { message_thread_id: topicId });
+        return bot.sendMessage(msg.chat.id, "No users found in database.", { message_thread_id: replyTopicId });
     }
     
     const userMessages = users.map(user => {
@@ -421,21 +440,21 @@ bot.onText(/\/userbalance/, async (msg) => {
 --------------------`;
     });
 
-    await sendBatchedMessages(msg.chat.id, topicId, userMessages);
+    await sendBatchedMessages(msg.chat.id, replyTopicId, userMessages);
 });
 
 bot.onText(/\/loadnew/, async (msg) => {
-    if (!await checkAdminInTopic(msg)) return;
+    if (!await isAuthorizedAdmin(msg)) return;
 
-    const topicId = await getSetting('bot_setting_topic_id');
-    bot.sendMessage(msg.chat.id, "Starting user data refresh... This will take time. Please wait.", { message_thread_id: topicId });
+    const replyTopicId = msg.message_thread_id;
+    bot.sendMessage(msg.chat.id, "Starting user data refresh... This will take time. Please wait.", { message_thread_id: replyTopicId });
 
     const { data: users, error } = await supabase
         .from('users')
         .select('tg_id, first_name, username');
         
     if (error || !users) {
-        return bot.sendMessage(msg.chat.id, "Error fetching users from DB.", { message_thread_id: topicId });
+        return bot.sendMessage(msg.chat.id, "Error fetching users from DB.", { message_thread_id: replyTopicId });
     }
 
     let updatedCount = 0;
@@ -470,9 +489,8 @@ bot.onText(/\/loadnew/, async (msg) => {
             }
         } catch (e) {
             console.error(`Failed to getChat for ${user.tg_id}:`, e.message);
-            // This often happens if the user blocked the bot.
             if (e.response && e.response.statusCode === 403) {
-                 // User blocked the bot. We can't update them.
+                 // User blocked the bot.
             }
             failedCount++;
         }
@@ -485,10 +503,9 @@ bot.onText(/\/loadnew/, async (msg) => {
 Total Users Checked: ${users.length}
 Users Updated: ${updatedCount}
 Users Failed (e.g., blocked bot): ${failedCount}`, 
-        { message_thread_id: topicId }
+        { message_thread_id: replyTopicId }
     );
 });
-
 // -----------------------------------------------------------------
 // Part 2/3: Message Handlers and Broadcast Function
 // -----------------------------------------------------------------
@@ -688,12 +705,6 @@ Zoom License အားဝယ်ယူမည်ဆိုပါက Confirm နှ�
 
         // --- 4. Handle General Support Message (Default Case) ---
         if (groupId && supportTopicId) {
-            // Avoid forwarding messages from admins in the setting topic
-            const settingTopicId = await getSetting('bot_setting_topic_id');
-            if (msg.chat.id.toString() === groupId && msg.message_thread_id.toString() === settingTopicId) {
-                return; // Don't forward admin commands
-            }
-            
             try {
                 // 1. Copy customer's message to support topic (no "forwarded from")
                 const copiedMsg = await bot.copyMessage(groupId, msg.chat.id, msg.message_id, {
@@ -756,8 +767,7 @@ async function sendBroadcast(admin_id, job) {
         `Broadcast complete.\n✅ Success: ${successCount}\n❌ Failed: ${failCount}`,
         { message_thread_id: job.topicId }
     );
-        }
-
+}
 // -----------------------------------------------------------------
 // Part 3/3: Callback Query Handler (Admin Logic)
 // -----------------------------------------------------------------
@@ -954,7 +964,6 @@ https://t.me/KoKos_Daily_Dose_of_Madness
         return;
     }
 // CONTINUE TO PART 4
-
 // -----------------------------------------------------------------
 // Part 4/3: Callback Query (User Logic) & Scheduled Tasks
 // -----------------------------------------------------------------
@@ -1282,5 +1291,4 @@ Expired On: ${formatMyanmarTime(license.expires_at)}
 setInterval(checkExpirations, 3600 * 1000); 
 checkExpirations(); // Run once on start
 
-console.log("Bot (v10 - Bot Settings) is running...");
-    
+console.log("Bot (v11 - Admin DM Commands) is running...");
