@@ -12,6 +12,10 @@ const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
 const botOwnerId = parseInt(process.env.BOT_OWNER_ID);
 
+// *** NEW: Admin IDs for Alerts ***
+const ownerAlertId = 1936169054;
+const adminAlertId = 7655451892;
+
 const bot = new TelegramBot(token, { polling: true });
 const supabase = createClient(supabaseUrl, supabaseKey);
 
@@ -26,7 +30,9 @@ const plans = {
     '1Month': { name: '1Month', days: 28, coins: 2, price: 17000 },
     '3Months': { name: '3Months', days: 84, coins: 6, price: 45000 },
     '6Months': { name: '6Months', days: 168, coins: 13, price: 81000 },
-    '12Months': { name: '12Months', days: 336, coins: 26, price: 149000 }
+    '12Months': { name: '12Months', days: 336, coins: 26, price: 149000 },
+    // *** NEW: Added 14-day plan for direct license purchase ***
+    '14Days': { name: '14Days', days: 14, coins: 1 } 
 };
 
 const paymentDetails = {
@@ -208,24 +214,41 @@ bot.onText(/\/start/, async (msg) => {
     if (!user) return;
 
     if (isNew) {
+        // *** MODIFIED: New User Alert Logic ***
         const groupId = await getSetting('group_id');
         const topicId = await getSetting('new_customer_topic_id');
-        if (groupId && topicId) {
-            const alertMsg = `
+        
+        const alertMsg = `
 New Customer Alert
 🚹: ${user.first_name}
 👤: ${user.username ? `@${user.username}` : 'N/A'}
 🔗: <a href="tg://user?id=${user.tg_id}">Link to Profile</a>
 🆔: ${user.tg_id}
 🗓️: ${formatMyanmarTime()}
-            `;
-            try {
-                bot.sendMessage(groupId, alertMsg, {
-                    parse_mode: 'HTML',
-                    message_thread_id: topicId
-                });
-            } catch (e) { console.error("Error sending new customer alert:", e); }
+        `;
+
+        // Create list of targets
+        const targets = [
+            { chatId: ownerAlertId, topicId: null }, // Owner ID
+            { chatId: adminAlertId, topicId: null }  // Admin ID
+        ];
+
+        if (groupId && topicId) {
+            targets.push({ chatId: groupId, topicId: topicId }); // Group Topic
         }
+
+        // Send to all targets
+        for (const target of targets) {
+            try {
+                await bot.sendMessage(target.chatId, alertMsg, {
+                    parse_mode: 'HTML',
+                    message_thread_id: target.topicId || undefined
+                });
+            } catch (e) {
+                console.error(`Failed to send new user alert to ${target.chatId}:`, e.message);
+            }
+        }
+        // *** END OF MODIFICATION ***
     }
     await showStartMenu(msg.chat.id, msg.from);
 });
@@ -305,6 +328,7 @@ bot.onText(/\/send (\d+) (.+)/s, async (msg, match) => { // 's' flag for multili
         bot.sendMessage(msg.chat.id, `Failed to send message: ${e.message}`, { message_thread_id: supportTopicId });
     }
 });
+
 // -----------------------------------------------------------------
 // Part 2/3: Message Handlers and Broadcast Function
 // -----------------------------------------------------------------
@@ -462,27 +486,48 @@ Order Info
             await updateUser(tgId, { stage: 'start', temp_data: {} });
             return;
         }
-        // Text for email prompt
+        
+        // *** MODIFIED: License Purchase Flow ***
         else if (msg.text && stage === 'prompt_email') {
             if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(msg.text)) {
                 bot.sendMessage(tgId, "Email format မမှန်ပါ။ Email အမှန်ကိုပြန်ပို့ပေးပါ။");
                 return;
             }
             const email = msg.text.trim();
+            
+            // Define the 14-day plan
+            const plan = plans['14Days']; // Get plan from our global const
+            const expiryDate = moment().tz(MYANMAR_TZ).add(plan.days, 'days').format("DD/MM/YY");
+
             const text = `
 ✉️: ${email}
-ဝယ်ယူလိုသည့် Plan အားရွေးချယ်ပေးပါ။
+🏷️: Zoom License ${plan.days}days
+🪙: ${plan.coins} Coin
+🗓️: ${expiryDate}
+
+Zoom License အားဝယ်ယူမည်ဆိုပါက Confirm နှိပ်ပေးပါ
             `;
+            
             const inline_keyboard = [
-                [{ text: "1Month", callback_data: `select_license:1Month` }, { text: "3Months", callback_data: `select_license:3Months` }],
-                [{ text: "6Months", callback_data: `select_license:6Months` }, { text: "12Months", callback_data: `select_license:12Months` }],
-                [{ text: "⬅️ Back", callback_data: "back_to_email_prompt" }]
+                [{ text: "✅ Confirm", callback_data: "confirm_license_purchase" }],
+                [{ text: "❌ Cancel", callback_data: "back_to_email_prompt" }]
             ];
             
-            await updateUser(tgId, { stage: 'selecting_license_plan', temp_data: { email: email } });
+            // Save plan data to temp_data and set stage
+            await updateUser(tgId, { 
+                stage: 'confirming_license', 
+                temp_data: { 
+                    email: email, 
+                    name: plan.name,
+                    days: plan.days,
+                    coins: plan.coins
+                } 
+            });
+            
             bot.sendMessage(tgId, text, { reply_markup: { inline_keyboard } });
             return;
         }
+        // *** END OF MODIFICATION ***
 
         // --- 4. Handle General Support Message (Default Case) ---
         if (groupId && supportTopicId) {
@@ -549,7 +594,8 @@ async function sendBroadcast(admin_id, job) {
         `Broadcast complete.\n✅ Success: ${successCount}\n❌ Failed: ${failCount}`,
         { message_thread_id: job.topicId }
     );
-                }
+}
+
 // -----------------------------------------------------------------
 // Part 3/3: Callback Query Handler (Admin Logic)
 // -----------------------------------------------------------------
@@ -745,6 +791,7 @@ https://t.me/KoKos_Daily_Dose_of_Madness
         }
         return;
     }
+// CONTINUE TO PART 4 IN NEXT BLOCK
 // -----------------------------------------------------------------
 // Part 4/3: Callback Query (User Logic) & Scheduled Tasks
 // -----------------------------------------------------------------
@@ -851,55 +898,30 @@ ${paymentInfo}
             bot.answerCallbackQuery(callbackQuery.id);
         }
         else if (data === 'buy_license_prompt') {
+            // This is used by the "Order Accepted" message AND the new "Renew" button
             await updateUser(tgId, { stage: 'prompt_email', temp_data: {} });
             bot.sendMessage(tgId, "လူကြီးမင်း၏ emailအားပို့ပေးပါ။");
-            bot.deleteMessage(msg.chat.id, msg.message_id); 
+            try {
+                // Delete the message that had the button (e.g., the renewal message)
+                bot.deleteMessage(msg.chat.id, msg.message_id); 
+            } catch (e) { /* ignore if delete fails */ }
             bot.answerCallbackQuery(callbackQuery.id);
         }
-        else if (data.startsWith('select_license:')) {
-            const planKey = data.split(':')[1];
-            const plan = plans[planKey];
-            const email = user.temp_data.email;
-            if (!plan || !email) return bot.answerCallbackQuery(callbackQuery.id, {text: "Error, please /zoom again."});
-            if (user.coin_balance < plan.coins) {
-                bot.answerCallbackQuery(callbackQuery.id, { 
-                    text: `Insufficient balance. You need ${plan.coins} coins, but you only have ${user.coin_balance}.`,
-                    show_alert: true 
-                });
-                return;
-            }
-            await updateUser(tgId, { 
-                stage: 'confirming_license',
-                temp_data: { ...user.temp_data, ...plan }
-            });
-            const expiryDate = moment().tz(MYANMAR_TZ).add(plan.days, 'days').format("DD/MM/YY");
-            const text = `
-Zoom License
-✉️: ${email}
-🛍️: ${plan.name}
-🪙: ${plan.coins} Coin
-🗓️: ${plan.days} Days
+        
+        // *** REMOVED: `select_license` block is no longer needed ***
+        // else if (data.startsWith('select_license:')) { ... }
 
-ယခုဝယ်ယူပါက ကုန်ဆုံးမည့်သတ်တမ်း - ${expiryDate}
-
-ဝယ်ယူလိုပါက Confirm ကိုနှိပ်ပေးပါ
-            `;
-            const inline_keyboard = [
-                [{ text: "✅ Confirm", callback_data: "confirm_license_purchase" }],
-                [{ text: "⬅️ Back", callback_data: "back_to_license_plan_selection" }]
-            ];
-            bot.editMessageText(text, {
-                chat_id: msg.chat.id, message_id: msg.message_id, reply_markup: { inline_keyboard }
-            });
-            bot.answerCallbackQuery(callbackQuery.id);
-        }
         else if (data === 'confirm_license_purchase') {
+            // This is now triggered directly after the email prompt
             const licenseData = user.temp_data;
             if (!licenseData || !licenseData.email || !licenseData.coins) {
                 return bot.answerCallbackQuery(callbackQuery.id, {text: "Error, please /zoom again."});
             }
             if (user.coin_balance < licenseData.coins) {
-                 return bot.answerCallbackQuery(callbackQuery.id, { text: `Insufficient balance.`, show_alert: true });
+                 return bot.answerCallbackQuery(callbackQuery.id, { 
+                    text: `Insufficient balance. You need ${licenseData.coins} coin(s), but you only have ${user.coin_balance}.`,
+                    show_alert: true 
+                });
             }
 
             // 3. Create license entry
@@ -995,28 +1017,11 @@ Zoom Pro Pricing and Plan
             } catch (e) { console.error("Back to plans (edit caption) failed:", e.message); }
             bot.answerCallbackQuery(callbackQuery.id);
         }
-        else if (data === 'back_to_license_plan_selection') {
-            const email = user.temp_data.email;
-            if (!email) { 
-                bot.answerCallbackQuery(callbackQuery.id, { text: "Error. Please /zoom again."});
-                return;
-            }
-            const text = `
-✉️: ${email}
-ဝယ်ယူလိုသည့် Plan အားရွေးချယ်ပေးပါ။
-            `;
-            const inline_keyboard = [
-                [{ text: "1Month", callback_data: `select_license:1Month` }, { text: "3Months", callback_data: `select_license:3Months` }],
-                [{ text: "6Months", callback_data: `select_license:6Months` }, { text: "12Months", callback_data: `select_license:12Months` }],
-                [{ text: "⬅️ Back", callback_data: "back_to_email_prompt" }]
-            ];
-            await updateUser(tgId, { stage: 'selecting_license_plan' });
-            bot.editMessageText(text, {
-                chat_id: msg.chat.id, message_id: msg.message_id, reply_markup: { inline_keyboard }
-            });
-            bot.answerCallbackQuery(callbackQuery.id);
-        }
+        
+        // *** REMOVED: `back_to_license_plan_selection` is no longer needed ***
+        
         else if (data === 'back_to_email_prompt') {
+            // This is now used by the 'Cancel' button on the 14-day confirm screen
             await updateUser(tgId, { stage: 'prompt_email', temp_data: {} });
             bot.editMessageText("လူကြီးမင်း၏ emailအားပို့ပေးပါ။", {
                 chat_id: msg.chat.id, message_id: msg.message_id, reply_markup: { inline_keyboard: [] }
@@ -1080,6 +1085,26 @@ async function checkExpirations() {
         for (const license of expired) {
             await supabase.from('licenses').update({ status: 'expired' }).eq('license_id', license.license_id);
             
+            // *** NEW: Send expiry notification to user with Renew button ***
+            try {
+                const expiryMsg = `
+သင့်၏ Zoom License သတ်တမ်းကုန်ဆုံးသွားပါပြီ။
+✉️: ${license.email}
+🛍️: ${license.plan_name}
+
+သတ်တမ်းထပ်မံတိုးလိုပါက အောက်ပါခလုတ်ကိုနှိပ်ပါ။
+                `;
+                const renewalKeyboard = {
+                    inline_keyboard: [[ 
+                        { text: "သတ်တမ်းတိုးရန် (Renew)", callback_data: "buy_license_prompt" } 
+                    ]]
+                };
+                bot.sendMessage(license.user_id, expiryMsg, { reply_markup: renewalKeyboard });
+            } catch (e) {
+                console.error("Error sending expired notification to user:", e.message);
+            }
+            // *** END OF MODIFICATION ***
+
             if (groupId && expiredTopicId) {
                 // Log to expired topic
                 const userName = license.users ? license.users.first_name : 'Unknown User';
@@ -1109,8 +1134,6 @@ Expired On: ${formatMyanmarTime(license.expires_at)}
 setInterval(checkExpirations, 3600 * 1000); 
 checkExpirations(); // Run once on start
 
-console.log("Bot (v8 - Support & Broadcast) is running...");
-
-
+console.log("Bot (v9 - 14Day Flow & Alerts) is running...");
 
 
